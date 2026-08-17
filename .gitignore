@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+logs/
+*.jsonl
+*.pkl
+.DS_Store
+build/
+dist/
+
+# generated media / simulation outputs
+*.mp4
+*.gif
+*.webm
+output/
+

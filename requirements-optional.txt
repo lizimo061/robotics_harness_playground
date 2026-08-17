@@ -1,0 +1,17 @@
+# --- MuJoCo (via Gymnasium Robotics: Fetch/Panda/UR5e manipulation tasks) ---
+mujoco>=3.0
+gymnasium>=0.29
+gymnasium-robotics>=1.2
+
+# --- Genesis (genesis-world: fast GPU physics + differentiable sim) ---
+# genesis-world
+# NOTE: genesis-world 0.2.x breaks with libigl>=2.6.0 (signed_distance returns
+# 4 values but Genesis unpacks 3). Pin libigl==2.5.1:
+#   pip install genesis-world "libigl==2.5.1"
+
+# --- robosuite (modular MuJoCo manipulation with standardized controllers) ---
+# robosuite>=1.4
+# torch
+
+# --- Dev / tests ---
+pytest>=8.0

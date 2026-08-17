@@ -1,0 +1,34 @@
+# Franka reach (with optional obstacle) in Genesis.
+#   python -m harness.cli configs/genesis_reach.yaml
+seed: 0
+
+llm:
+  provider: deepseek
+  model: deepseek-chat
+  api_key_env: DEEPSEEK_API_KEY
+
+env:
+  name: "genesis:reach"      # or genesis:reach_avoid
+  task: reach
+  max_episode_steps: 120
+  params:
+    difficulty: 0.5
+    backend: cpu
+    control_mode: ee_delta
+    show_viewer: false
+
+agent:
+  name: llm_controller
+  mode: tools
+  max_steps: 60
+
+eval:
+  episodes: 3
+  log_dir: logs
+  verbose: true
+
+viz:
+  enabled: true
+  backend: html
+  output: logs/genesis_reach.html
+  fps: 6

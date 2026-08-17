@@ -1,0 +1,33 @@
+# RoboLab (Isaac Lab) task via the harness agent.
+# NOTE: run through examples/run_robolab.py (which sets up the Isaac Sim
+# AppLauncher), NOT the generic CLI. This config documents the env/agent shape.
+seed: 0
+
+llm:
+  provider: deepseek
+  model: deepseek-chat
+  api_key_env: DEEPSEEK_API_KEY
+
+env:
+  name: "robolab:PickCubeTask"
+  task: PickCubeTask
+  params:
+    device: cuda:0
+    action_mode: ee_delta
+    num_envs: 1
+
+agent:
+  name: llm_controller
+  mode: tools
+  max_steps: 100
+
+eval:
+  episodes: 1
+  log_dir: logs
+  verbose: true
+
+viz:
+  enabled: true
+  backend: html
+  output: logs/robolab.html
+  capture_frames: false

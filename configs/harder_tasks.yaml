@@ -1,0 +1,35 @@
+# Harder robot-arm tasks solved with the tool-use agent.
+#   export DEEPSEEK_API_KEY=sk-...
+#   python -m harness.cli configs/harder_tasks.yaml
+seed: 0
+
+llm:
+  provider: deepseek
+  model: deepseek-chat
+  api_key_env: DEEPSEEK_API_KEY
+  temperature: 0.2
+  max_tokens: 1024
+
+env:
+  name: tabletop
+  task: stack          # pick_place | pick_place_obstacle | push | stack | sort | reach_avoid
+  seed: 2
+  max_episode_steps: 100
+  params:
+    difficulty: 0.5
+
+agent:
+  name: llm_controller
+  mode: tools           # tool-use: grasp / move_to / list_objects / done / ...
+  max_steps: 60
+
+eval:
+  episodes: 3
+  log_dir: logs
+  verbose: true
+
+viz:
+  enabled: true
+  backend: html
+  output: logs/hard_task.html
+  fps: 6

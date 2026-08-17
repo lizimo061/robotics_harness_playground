@@ -1,0 +1,34 @@
+# Franka cube-stacking in Genesis (genesis-world).
+#   python -m harness.cli configs/genesis_stack.yaml
+seed: 0
+
+llm:
+  provider: deepseek
+  model: deepseek-chat
+  api_key_env: DEEPSEEK_API_KEY
+
+env:
+  name: "genesis:stack"
+  task: stack
+  max_episode_steps: 200
+  params:
+    difficulty: 0.6
+    backend: cpu
+    control_mode: ee_delta
+    show_viewer: false
+
+agent:
+  name: llm_controller
+  mode: tools
+  max_steps: 100
+
+eval:
+  episodes: 3
+  log_dir: logs
+  verbose: true
+
+viz:
+  enabled: true
+  backend: html
+  output: logs/genesis_stack.html
+  fps: 6

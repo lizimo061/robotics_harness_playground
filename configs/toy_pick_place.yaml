@@ -1,0 +1,48 @@
+# Offline demo: runs end-to-end with a scripted mock LLM (no API key needed).
+#   python -m harness.cli configs/toy_pick_place.yaml
+seed: 0
+
+llm:
+  provider: mock
+  extra:
+    script:
+      - action: move
+        delta: [0.25, 0.25]
+      - action: move
+        delta: [0.15, 0.15]
+      - action: close
+      - action: move
+        delta: [0.25, 0.25]
+      - action: move
+        delta: [0.10, 0.10]
+      - action: stop
+    fallback: '{"action": "stop"}'
+
+env:
+  name: toy_tabletop
+  task: pick_and_place
+  seed: 0
+  max_episode_steps: 100
+  render: false
+  params:
+    obj_pos: [0.5, 0.5]
+    goal_pos: [0.85, 0.85]
+
+agent:
+  name: llm_controller
+  mode: json
+  max_steps: 20
+  use_vision: false
+
+eval:
+  episodes: 1
+  log_dir: logs
+  save_trajectories: true
+  verbose: true
+
+viz:
+  enabled: true
+  backend: html          # html (replay file) | console (live print) | live (matplotlib) | none
+  output: logs/viz.html
+  fps: 8
+  capture_frames: true

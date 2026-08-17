@@ -1,0 +1,22 @@
+# Kimi (Moonshot) demo. Set MOONSHOT_API_KEY.
+seed: 0
+
+llm:
+  provider: kimi
+  model: moonshot-v1-8k
+  api_key_env: MOONSHOT_API_KEY
+  temperature: 0.2
+  max_tokens: 1024
+
+env:
+  name: toy_tabletop
+  task: pick_and_place
+
+agent:
+  mode: json
+  max_steps: 40
+
+eval:
+  episodes: 3
+  log_dir: logs
+  verbose: true

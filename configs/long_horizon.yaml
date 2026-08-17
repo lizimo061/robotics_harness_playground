@@ -1,0 +1,30 @@
+# Long-horizon task: put the bread into the oven, then press the button.
+#   export DEEPSEEK_API_KEY=sk-...
+#   python -m harness.cli configs/long_horizon.yaml
+seed: 0
+
+llm:
+  provider: deepseek
+  model: deepseek-chat
+  api_key_env: DEEPSEEK_API_KEY
+
+env:
+  name: kitchen
+  task: cook_bread
+  max_episode_steps: 200
+
+agent:
+  name: llm_controller
+  mode: skills          # plan -> execute skills with subgoal verification
+  max_steps: 100
+
+eval:
+  episodes: 3
+  log_dir: logs
+  verbose: true
+
+viz:
+  enabled: true
+  backend: html
+  output: logs/long_horizon.html
+  fps: 6

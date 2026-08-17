@@ -1,0 +1,39 @@
+# Franka pick-and-place in Genesis (genesis-world).
+#   pip install genesis-world
+#   export DEEPSEEK_API_KEY=sk-...
+#   python -m harness.cli configs/genesis_pick_place.yaml
+seed: 0
+
+llm:
+  provider: deepseek
+  model: deepseek-chat
+  api_key_env: DEEPSEEK_API_KEY
+  temperature: 0.2
+  max_tokens: 1024
+
+env:
+  name: "genesis:pick_place"
+  task: pick_place
+  max_episode_steps: 200
+  params:
+    difficulty: 0.5
+    backend: cpu
+    control_mode: ee_delta
+    show_viewer: false
+    camera_res: [320, 320]
+
+agent:
+  name: llm_controller
+  mode: tools            # tool-use: move_to / grasp / list_objects / done / ...
+  max_steps: 80
+
+eval:
+  episodes: 3
+  log_dir: logs
+  verbose: true
+
+viz:
+  enabled: true
+  backend: html
+  output: logs/genesis_pick_place.html
+  fps: 6

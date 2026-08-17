@@ -1,0 +1,22 @@
+# MuJoCo via gymnasium-robotics. Requires: pip install mujoco gymnasium gymnasium-robotics
+seed: 0
+
+llm:
+  provider: deepseek
+  model: deepseek-chat
+  api_key_env: DEEPSEEK_API_KEY
+
+env:
+  name: "gymnasium:FetchPickAndPlace-v3"
+  task: pick_and_place
+  max_episode_steps: 200
+
+agent:
+  mode: json
+  max_steps: 100
+  use_vision: false
+
+eval:
+  episodes: 5
+  log_dir: logs
+  verbose: true
