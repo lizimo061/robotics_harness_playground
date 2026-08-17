@@ -1,10 +1,12 @@
 """Restricted execution of LLM-generated Python (Code-as-Policies).
 
 SECURITY NOTE: executing model-generated code is inherently unsafe. This module
-runs the snippet in-process with a strict builtins allowlist, an AST import
-blocklist, and a signal-based timeout. It is a best-effort guardrail, not a hard
-security boundary: do not use "code" mode with untrusted model output in a
-privileged environment. Prefer "json" mode for untrusted models.
+runs the snippet in-process with a strict builtins allowlist, an AST import/call
+blocklist, a dunder-attribute blocklist (closing the classic
+``().__class__.__base__.__subclasses__()`` object-graph-walk sandbox escape),
+and a signal-based timeout. It is a best-effort guardrail, not a hard security
+boundary: do not use "code" mode with untrusted model output in a privileged
+environment. Prefer "json" mode for untrusted models.
 """
 from __future__ import annotations
 
@@ -42,6 +44,12 @@ def _check_ast(code: str) -> None:
             f = node.func
             if isinstance(f, ast.Name) and f.id in _BLOCKED_ROOTS:
                 raise ValueError(f"call to '{f.id}' is not allowed")
+        elif isinstance(node, ast.Attribute):
+            if node.attr.startswith("__") and node.attr.endswith("__"):
+                raise ValueError(f"access to dunder attribute '{node.attr}' is not allowed")
+        elif isinstance(node, ast.Name):
+            if node.id.startswith("__") and node.id.endswith("__"):
+                raise ValueError(f"access to dunder name '{node.id}' is not allowed")
 
 
 class _Timeout(Exception):

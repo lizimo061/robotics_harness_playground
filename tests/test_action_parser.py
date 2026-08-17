@@ -25,6 +25,17 @@ class TestExtractJson(unittest.TestCase):
     def test_none_for_garbage(self):
         self.assertIsNone(extract_json("no json here"))
 
+    def test_bare_array(self):
+        text = '[{"skill": "move_to", "args": {"x": 1}}, {"skill": "grasp", "args": {}}]'
+        self.assertEqual(
+            extract_json(text),
+            [{"skill": "move_to", "args": {"x": 1}}, {"skill": "grasp", "args": {}}],
+        )
+
+    def test_array_with_prose(self):
+        text = 'Here is the plan: [{"skill": "open"}, {"skill": "close"}] done'
+        self.assertEqual(extract_json(text), [{"skill": "open"}, {"skill": "close"}])
+
 
 class TestParseAction(unittest.TestCase):
     def test_move(self):
@@ -50,6 +61,11 @@ class TestParseAction(unittest.TestCase):
 
     def test_garbage_is_noop(self):
         a = parse_action("blah blah no json")
+        self.assertEqual(a.kind, "noop")
+
+    def test_top_level_array_is_noop(self):
+        # a bare JSON array is not a valid action payload; must not raise
+        a = parse_action('[{"action": "move"}]')
         self.assertEqual(a.kind, "noop")
 
 

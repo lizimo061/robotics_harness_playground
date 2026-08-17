@@ -21,6 +21,16 @@ class TestParsePlan(unittest.TestCase):
     def test_garbage(self):
         self.assertEqual(parse_plan("not json"), [])
 
+    def test_bare_array_plan(self):
+        # the planning prompt asks for a raw JSON list (not wrapped in
+        # {"plan": [...]}); the model may return exactly that.
+        plan = parse_plan(
+            '[{"skill": "open", "args": {"container": "oven"}}, '
+            '{"skill": "press", "args": {"button": "button"}}]'
+        )
+        self.assertEqual(len(plan), 2)
+        self.assertEqual(plan[1], {"skill": "press", "args": {"button": "button"}})
+
 
 class TestSkillsSolve(unittest.TestCase):
     def _env(self):

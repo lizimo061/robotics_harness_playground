@@ -64,7 +64,7 @@ def parse_tool_call(text: str):
     Accepts: {"tool": name, "args": {...}} | {"name":..., "arguments": {...}}
     """
     data = extract_json(text)
-    if data is None:
+    if not isinstance(data, dict):
         return None, None
     name = data.get("tool") or data.get("name") or data.get("action")
     args = data.get("args") or data.get("arguments") or data.get("parameters")

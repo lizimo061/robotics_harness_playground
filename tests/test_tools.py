@@ -76,6 +76,10 @@ class TestParseToolCall(unittest.TestCase):
     def test_garbage(self):
         self.assertIsNone(parse_tool_call("no json here")[0])
 
+    def test_top_level_array_is_not_a_tool_call(self):
+        # a bare JSON array is not a valid tool-call payload; must not raise
+        self.assertEqual(parse_tool_call('[{"tool": "grasp"}]'), (None, None))
+
 
 class TestToolsMode(unittest.TestCase):
     def _stack_env(self):

@@ -33,6 +33,29 @@ class TestCodeExecutor(unittest.TestCase):
         r = execute_code("def broken(:", namespace={})
         self.assertFalse(r["ok"])
 
+    def test_blocks_subclasses_sandbox_escape(self):
+        # classic object-graph-walk escape: reach a live module (e.g. os) via
+        # ().__class__.__base__.__subclasses__() without ever importing it.
+        code = (
+            "target = None\n"
+            "for c in ().__class__.__base__.__subclasses__():\n"
+            "    try:\n"
+            "        g = c.__init__.__globals__\n"
+            "    except:\n"
+            "        continue\n"
+            "    if 'os' in g:\n"
+            "        target = g['os']\n"
+            "        break\n"
+            "target.system('id')\n"
+        )
+        r = execute_code(code, namespace={})
+        self.assertFalse(r["ok"])
+        self.assertIn("dunder", r["error"])
+
+    def test_blocks_bare_dunder_name(self):
+        r = execute_code("print(__builtins__)", namespace={})
+        self.assertFalse(r["ok"])
+
 
 if __name__ == "__main__":
     unittest.main()
