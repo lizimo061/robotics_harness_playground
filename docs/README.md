@@ -25,6 +25,7 @@ harness/ is a layered control stack for LLM-driven robot control in simulation:
 | Add a simulator backend | modules/envs.md + guides/add-environment.md |
 | Generate or add a harder task | modules/tasks.md + guides/add-task.md |
 | Add a tool for the agent | modules/tools.md + guides/add-tool.md |
+| Let an LLM plan on top of a trained policy (policy-as-tool) | modules/policies.md |
 | Solve a long-horizon task (plan -> skills -> actions) | guides/long-horizon.md + modules/skills.md |
 | Tweak the control loop / agent modes | modules/agent.md |
 | Visualize a run (animation + LLM trace) | modules/viz.md |
@@ -44,6 +45,7 @@ harness/ is a layered control stack for LLM-driven robot control in simulation:
 - tools/      -> modules/tools.md
 - skills/ + planning -> modules/skills.md
 - policy + serving (agent/policy.py, serving.py) -> modules/policy.md
+- policies/ + policy-as-tool (tools/policy_tool.py) -> modules/policies.md
 - core primitives (types.py, registry.py, utils/, runner.py, cli.py) -> modules/core.md
 - robot/      -> modules/robot.md
 - perception/ -> modules/perception.md

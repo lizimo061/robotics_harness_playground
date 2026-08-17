@@ -69,23 +69,44 @@ def build_system_prompt(*, task: str, action_space: ActionSpace, mode: str = "js
 
 
 def build_tools_system_prompt(*, task: str, tools) -> str:
-    lines = [
-        "You are a robot control policy. Complete the task by calling tools, one at a time.",
-        "You observe the state as text each turn and reply with ONE tool call.",
-        "",
-        "## Task",
-        str(task),
-        "",
-        "## Tools",
-    ]
+    has_policy = any(getattr(t, "name", "") == "run_policy" for t in tools)
+
+    if has_policy:
+        header = [
+            "You are the high-level planner for a robot arm. A trained low-level policy",
+            "does the actual motor control: you decide WHAT to do next and delegate the",
+            "motion to it, then verify the result and continue.",
+            "You observe the state as text each turn and reply with ONE tool call.",
+        ]
+    else:
+        header = [
+            "You are a robot control policy. Complete the task by calling tools, one at a time.",
+            "You observe the state as text each turn and reply with ONE tool call.",
+        ]
+
+    lines = header + ["", "## Task", str(task), "", "## Tools"]
     for t in tools:
         lines.append(f"- {t.signature()}: {t.description}")
     lines += [
         "",
         "## Output format",
         'Reply with exactly one JSON object: {"tool": "<name>", "args": {<arguments>}}',
-        "Use small moves. Call done() when the task is finished.",
     ]
+    if has_policy:
+        lines += [
+            "",
+            "## How to work",
+            "1. Break the task into concrete single-step sub-instructions.",
+            "2. Delegate each one with run_policy, e.g."
+            ' {"tool": "run_policy", "args": {"instruction": "pick up the banana", "steps": 60}}',
+            "3. Read the returned state (and the perception tools) to check whether it worked.",
+            "4. If a sub-instruction did not work, retry it or rephrase it more concretely",
+            "   before moving on. Do not repeat a sub-instruction that already succeeded.",
+            "5. Call done() once the whole task is complete.",
+            "Keep sub-instructions short, physical, and about ONE object at a time.",
+        ]
+    else:
+        lines.append("Use small moves. Call done() when the task is finished.")
     return _NL.join(lines)
 
 

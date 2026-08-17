@@ -1,0 +1,47 @@
+# RoboLab with policy-as-tool: the LLM plans, a trained VLA executes.
+#
+# The LLM runs in tools mode and calls run_policy("pick up the banana") to hand
+# low-level motor control to the policy server, then checks the result with the
+# perception tools and continues. Start the policy server first (a pi0.5/GR00T
+# backend wrapped behind the harness protocol, or examples/serve_robolab.py).
+#
+# NOTE: run through examples/run_robolab.py --policy-url http://localhost:8000
+# (it sets up the Isaac Sim AppLauncher), NOT the generic CLI.
+seed: 0
+
+llm:
+  provider: deepseek
+  model: deepseek-chat
+  api_key_env: DEEPSEEK_API_KEY
+
+env:
+  name: "robolab:BananaInBowlTask"
+  task: BananaInBowlTask
+  params:
+    device: cuda:0
+    action_mode: ee_delta
+    num_envs: 1
+
+agent:
+  name: llm_controller
+  mode: tools          # policy-as-tool requires tools mode
+  max_steps: 30        # LLM turns (each run_policy call spends many env steps)
+  extra:
+    policy:
+      type: remote     # remote | llm | scripted
+      base_url: http://localhost:8000
+      action_dim: 8
+    policy_options:
+      default_steps: 60   # env steps per run_policy call when the LLM omits it
+      max_steps: 400      # hard cap per call
+
+eval:
+  episodes: 1
+  log_dir: logs
+  verbose: true
+
+viz:
+  enabled: true
+  backend: html
+  output: logs/robolab_policy_tool.html
+  capture_frames: false

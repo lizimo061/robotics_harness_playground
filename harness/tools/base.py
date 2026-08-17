@@ -21,17 +21,27 @@ class ToolResult:
     feedback: text returned to the agent (perception result, confirmation, ...)
     action:   optional low-level action to apply to the environment
     done:     True when the tool declares the episode finished
+    steps:    env steps the tool consumed itself (closed-loop tools only)
+    success:  terminal success observed while the tool ran, if it saw one
     """
 
     feedback: str = ""
     action: Optional[Action] = None
     done: bool = False
+    steps: int = 0
+    success: Optional[bool] = None
 
 
 class Tool(ABC):
     name: str = ""
     description: str = ""
     parameters: dict[str, Any] = field(default_factory=dict)  # JSON Schema for the arguments
+
+    #: When True, run() drives the environment itself for several steps instead
+    #: of returning a single Action for the caller to apply. The agent passes an
+    #: ``on_step(action, step_result)`` callback so those inner steps still land
+    #: in the recorded Episode.
+    closed_loop: bool = False
 
     @abstractmethod
     def run(self, env, **args: Any) -> ToolResult:

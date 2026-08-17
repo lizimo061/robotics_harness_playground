@@ -41,8 +41,14 @@ class ToolRegistry:
         return list(self._tools.values())
 
 
-def get_default_tools() -> list[Tool]:
-    return [
+def get_default_tools(policy=None, **policy_kwargs) -> list[Tool]:
+    """The standard toolset; prepends run_policy when a policy is supplied."""
+    tools: list[Tool] = []
+    if policy is not None:
+        from harness.tools.policy_tool import RunPolicyTool
+
+        tools.append(RunPolicyTool(policy, **policy_kwargs))
+    tools += [
         MoveToTool(),
         MoveDeltaTool(),
         GraspTool(),
@@ -53,6 +59,28 @@ def get_default_tools() -> list[Tool]:
         ListObjectsTool(),
         ListGoalsTool(),
         ListObstaclesTool(),
+        IsGraspedTool(),
+        DoneTool(),
+    ]
+    return tools
+
+
+def get_policy_tools(policy, **policy_kwargs) -> list[Tool]:
+    """Policy-centric toolset for continuous-control benchmarks (RoboLab).
+
+    All motion goes through run_policy, so the hand-written ee/joint action tools
+    are dropped -- their 2D/3D coordinate model does not match a RoboLab action
+    vector, and mixing the two invites the LLM to fight the policy for control.
+    What is left: delegate motion, perceive, declare done.
+    """
+    from harness.tools.policy_tool import RunPolicyTool
+
+    return [
+        RunPolicyTool(policy, **policy_kwargs),
+        GetEEPoseTool(),
+        GetObjectPosTool(),
+        ListObjectsTool(),
+        ListGoalsTool(),
         IsGraspedTool(),
         DoneTool(),
     ]

@@ -7,6 +7,13 @@ example pattern.
     python examples/run_robolab.py --task PickCubeTask --headless          # real DeepSeek (tools mode)
     python examples/run_robolab.py --task BananaInBowlTask --mode tools --headless
     python examples/run_robolab.py --task PickCubeTask --scripted --headless   # offline, no API key
+
+Hierarchical mode (policy-as-tool): the LLM plans and a trained VLA executes.
+Point --policy-url at a policy server speaking the harness protocol (see
+examples/serve_robolab.py, or wrap pi0.5/GR00T behind it):
+
+    python examples/run_robolab.py --task BananaInBowlTask --headless \
+        --policy-url http://localhost:8000
 """
 import argparse
 import os
@@ -26,6 +33,12 @@ parser.add_argument("--mode", default="tools", choices=["json", "tools", "code",
 parser.add_argument("--max-steps", type=int, default=100)
 parser.add_argument("--scripted", action="store_true", help="run a deterministic no-op loop (no LLM)")
 parser.add_argument("--action-mode", default="ee_delta", choices=["ee_delta", "joint_position"])
+parser.add_argument(
+    "--policy-url",
+    default="",
+    help="policy-server URL; enables hierarchical policy-as-tool mode (LLM plans, policy executes)",
+)
+parser.add_argument("--policy-steps", type=int, default=60, help="default env steps per run_policy call")
 args_cli, _ = parser.parse_known_args()
 args_cli.enable_cameras = True
 args_cli.save_videos = True
@@ -70,9 +83,22 @@ def main() -> None:
             provider = "deepseek" if os.environ.get("DEEPSEEK_API_KEY") else "kimi"
             llm = get_llm(LLMConfig(provider=provider))
             recorder = TraceRecorder(capture_frames=False, metadata={"env": env.name, "mode": args_cli.mode})
+
+            policy = None
+            if args_cli.policy_url:
+                # hierarchical: the LLM delegates motion to the policy via run_policy
+                policy = {
+                    "type": "remote",
+                    "base_url": args_cli.policy_url,
+                    "action_dim": env.action_space.dim,
+                }
+                print(f"policy-as-tool enabled -> {args_cli.policy_url}")
+
             ctrl = LLMController(
                 llm, mode=args_cli.mode, max_steps=args_cli.max_steps,
                 task_description=env.get_text_state(), recorder=recorder,
+                policy=policy,
+                policy_options={"default_steps": args_cli.policy_steps},
             )
             ep = ctrl.run(env)
             print(f"result: success={ep.success} steps={ep.steps} reward={ep.total_reward:.3f}")
