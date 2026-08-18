@@ -690,12 +690,48 @@ class RoboLabEnv(Env):
             return v
 
     def _extract_success(self, info: dict) -> bool:
+        """Read the task's success signal from the TERMINATION MANAGER.
+
+        This is where RoboLab keeps it. A benchmark task declares e.g.
+
+            success = DoneTerm(func=object_in_container,
+                               params={"object": "rubiks_cube", "container": "bowl", ...})
+
+        and IsaacLab exposes the per-term result through
+        ``termination_manager.get_term(name)``. It does NOT put a "success" key in
+        the info dict -- ``extras["log"]["Episode_Termination/success"]`` is an
+        episode-averaged statistic, not this step's outcome.
+
+        Reading info keys alone therefore returned False for every episode no
+        matter what happened: measured, the scripted probe carried the cube 0.22m
+        into the bowl, the env set terminated=True at step 68 of a 600-step limit
+        (so time_out could not have fired) and get_term("success") was True -- while
+        the adapter reported failure. Every RoboLab number taken before this fix
+        was scoring nothing at all.
+        """
+        unwrapped = getattr(self._env, "unwrapped", self._env)
+        manager = getattr(unwrapped, "termination_manager", None)
+        if manager is not None:
+            for name in (getattr(manager, "active_terms", None) or []):
+                low = str(name).lower()
+                if "success" not in low and "goal" not in low:
+                    continue  # time_out is not success
+                try:
+                    arr = np.asarray(_to_numpy(manager.get_term(name))).ravel()
+                except Exception:  # noqa: BLE001 - term not readable this step
+                    continue
+                if arr.size and bool(arr[0]):
+                    return True
         for key in ("success", "is_success", "task_success", "goal_achieved"):
             if key in info:
                 arr = np.asarray(_to_numpy(info[key])).ravel()
                 if arr.size:
                     return bool(arr[0])
         return False
+
+    def _check_success(self) -> bool:
+        """Used by Env.is_success() when no info dict is supplied."""
+        return self._extract_success({})
 
     # -- text / subgoal --------------------------------------------------- #
     # -- scene query API -------------------------------------------------- #

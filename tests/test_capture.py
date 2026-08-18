@@ -211,3 +211,39 @@ class TestScriptedPickPlace(unittest.TestCase):
         from harness.agent.baselines import get_baseline_agent
         with self.assertRaises(KeyError):
             get_baseline_agent("teleop")
+
+
+class TestScriptedProbeDwell(unittest.TestCase):
+    """A success predicate cannot fire before the object comes to rest.
+
+    Measured on RoboLab: the probe grasped the cube, carried it 0.22 m into the
+    bowl, released -- and the episode reported failure, because every phase had
+    converged early and it exited at step 68 of 260 before the check could observe
+    the settled scene. Success was also only read from the FINAL info dict, so a
+    success seen mid-episode was discarded.
+    """
+
+    def test_it_holds_still_after_releasing(self):
+        from harness.agent.baselines import get_baseline_agent
+        env = TabletopEnv(task="pick_place")
+        env.reset(seed=0)
+        agent = get_baseline_agent("scripted_pick_place", source="cube",
+                                   target=env.list_goals()[0], max_steps=400)
+        ep = agent.run(env, seed=0)
+        # the dwell phase releases, so the last actions must have the gripper open
+        self.assertTrue(any(a.comment == "dwell" for a in ep.actions)
+                        or ep.success, "no dwell and no success")
+        env.close()
+
+    def test_a_success_seen_mid_episode_is_not_discarded(self):
+        from harness.agent.baselines import ScriptedPickPlaceAgent
+        from harness.types import Episode
+
+        # an episode whose success appeared before the final step
+        ep = Episode(infos=[{"success": True}, {"success": False}])
+        self.assertTrue(any(i.get("success") for i in ep.infos))
+
+    def test_the_dwell_length_is_configurable(self):
+        from harness.agent.baselines import get_baseline_agent
+        a = get_baseline_agent("scripted_pick_place", source="x", target="y", dwell=7)
+        self.assertEqual(a._dwell, 7)

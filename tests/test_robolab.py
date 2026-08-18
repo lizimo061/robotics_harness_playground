@@ -561,3 +561,57 @@ class TestMeasuredGraspOffset(unittest.TestCase):
             Action(kind="ee_pose", value=[0.431, -0.097, 0.034]))).ravel()
         # the measured grasp height for a cube at 0.034
         self.assertAlmostEqual(float(out[2]), 0.160, places=3)
+
+
+class TestSuccessSignalSource(unittest.TestCase):
+    """RoboLab keeps success in the TERMINATION MANAGER, not the info dict.
+
+    A benchmark task declares e.g.
+        success = DoneTerm(func=object_in_container, params={...})
+    and IsaacLab exposes the result via termination_manager.get_term(name).
+    extras["log"]["Episode_Termination/success"] is an episode-averaged statistic,
+    not this step's outcome, so reading info keys returned False for every episode
+    regardless of what happened -- the scripted probe carried the cube 0.22m into
+    the bowl, get_term("success") was True, and the adapter still reported failure.
+    """
+
+    class _Manager:
+        def __init__(self, terms):
+            self._terms = terms
+            self.active_terms = list(terms)
+
+        def get_term(self, name):
+            import numpy as np
+            return np.array([self._terms[name]])
+
+    def _env_with(self, terms):
+        import harness.envs.robolab as r
+        env = r.RoboLabEnv.__new__(r.RoboLabEnv)
+        inner = _FakeInner()
+        inner.unwrapped = inner
+        inner.termination_manager = self._Manager(terms)
+        env._env = inner
+        return env
+
+    def test_the_success_term_is_read(self):
+        env = self._env_with({"time_out": False, "success": True})
+        self.assertTrue(env._extract_success({}))
+
+    def test_a_timeout_is_not_success(self):
+        env = self._env_with({"time_out": True, "success": False})
+        self.assertFalse(env._extract_success({}))
+
+    def test_a_goal_named_term_also_counts(self):
+        env = self._env_with({"time_out": False, "goal_reached": True})
+        self.assertTrue(env._extract_success({}))
+
+    def test_the_info_dict_remains_a_fallback(self):
+        import harness.envs.robolab as r
+        env = r.RoboLabEnv.__new__(r.RoboLabEnv)
+        env._env = _FakeInner()
+        self.assertTrue(env._extract_success({"success": True}))
+        self.assertFalse(env._extract_success({"success": False}))
+
+    def test_is_success_uses_the_same_path(self):
+        env = self._env_with({"time_out": False, "success": True})
+        self.assertTrue(env._check_success())

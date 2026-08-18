@@ -269,7 +269,8 @@ class ScriptedPickPlaceAgent(Agent):
 
     def __init__(self, *, source: str = "", target: str = "", max_steps: int = 260,
                  hover: float = 0.12, tol: float = 0.02, settle: int = 6,
-                 phase_budget: int = 32, top_down: bool = True, **kwargs) -> None:
+                 phase_budget: int = 32, top_down: bool = True,
+                 dwell: int = 40, **kwargs) -> None:
         self._source = source
         self._target = target
         self._max_steps = int(max_steps)
@@ -287,6 +288,13 @@ class ScriptedPickPlaceAgent(Agent):
         #: its start orientation cannot close on an object lying on a table, so
         #: without this the probe reaches the right place and still never grasps.
         self._top_down = bool(top_down)
+        #: Steps to hold still after releasing, gripper open.
+        #: A task's success predicate is evaluated from the simulated state, so it
+        #: cannot fire until the object has actually come to rest where it was put.
+        #: Without this the probe placed the object correctly and then exited before
+        #: the check could observe it -- measured: the cube carried 0.22m into the
+        #: bowl and the episode still reported failure.
+        self._dwell = int(dwell)
 
     def _pos(self, env: Env, name: str):
         """Locate a named thing, whether the env calls it an object or a goal.
@@ -398,8 +406,26 @@ class ScriptedPickPlaceAgent(Agent):
                 if result.success or result.terminated or result.truncated:
                     done = True
 
+        # Let the scene settle so the task's success check can see the outcome.
+        last = waypoints[-1][0] if waypoints else None
+        for _ in range(self._dwell):
+            if done or ep.steps >= self._max_steps or last is None:
+                break
+            value = np.asarray(last, dtype=np.float32)[:dim]
+            if grasp_quat is not None and dim >= 3:
+                value = np.concatenate([value, grasp_quat])
+            action = Action(kind="ee_pose", value=value, gripper=0.0, comment="dwell")
+            result = env.step(action)
+            ep.actions.append(action)
+            ep.rewards.append(result.reward)
+            ep.infos.append(result.info)
+            ep.observations.append(result.obs)
+            if result.success or result.terminated:
+                done = True
+
         ep.success = bool(ep.infos and ep.infos[-1].get("success", False)) or bool(
-            getattr(env, "is_success", lambda: False)())
+            getattr(env, "is_success", lambda: False)()) or bool(
+            any(i.get("success") for i in ep.infos))
         ep.total_reward = sum(ep.rewards)
         ep.metadata["steps"] = ep.steps
         return ep
