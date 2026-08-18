@@ -27,7 +27,7 @@ from harness.agent.prompts import (
 from harness.agent.skills import SkillContext, get_skill_docs
 from harness.envs.base import Env
 from harness.llm.base import ChatMessage, LLMClient
-from harness.llm.capabilities import TokenUsage, estimate_cost
+from harness.llm.capabilities import TokenUsage, check_vision_config, estimate_cost
 from harness.types import Action, Episode
 from harness.utils.logging import get_logger
 from harness.viz.recorder import TraceRecorder, TraceStep, action_to_dict
@@ -47,6 +47,30 @@ def _extract_code(text: str) -> str:
             lines = lines[:-1]
         t = chr(10).join(lines).strip()
     return t
+
+
+def model_id_of(llm: Any) -> Optional[str]:
+    """The model id this client will actually request, or None if it does not say.
+
+    Every client built by `get_llm` names its model, so a real run is always
+    checkable. None means "this object never told us" -- an in-process test double
+    -- which is different from "unknown model", and must not be conflated with it.
+    """
+    for attr in ("model", "_model"):
+        value = getattr(llm, attr, None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def is_offline_llm(llm: Any) -> bool:
+    """True for the offline mock provider (`provider: mock` and its aliases).
+
+    The mock replays scripted replies, so its answers are identical with or
+    without an image: there is no evaluation to invalidate, and gating it would
+    break every offline test and demo. This is the documented escape hatch.
+    """
+    return (type(llm).__module__ or "").startswith("harness.llm.mock")
 
 
 def _serialize_messages(messages: list[ChatMessage]) -> list[dict]:
@@ -85,6 +109,11 @@ class LLMController:
         two_clock: bool = False,
         monitor_decisions: int = 4,
         tier: str = "privileged",
+        #: Skip the "can this model actually see?" check. Only for offline plumbing
+        #: tests and for a model whose image support is real but not yet recorded in
+        #: harness/llm/capabilities.py -- it disables the guard, it does not grant
+        #: sight, so a blind model still scores zero for the wrong reason.
+        allow_blind_vision: bool = False,
         detector: Any = None,
         system_prompt: str = "",
         temperature: Optional[float] = None,
@@ -102,6 +131,10 @@ class LLMController:
         self._use_vision = use_vision
         self._warned_no_image = False
         self._tier = str(tier or "privileged")
+        self._allow_blind_vision = bool(allow_blind_vision)
+        # Refuse before any environment is built: a vision run on a blind model is
+        # not a degraded measurement, it is a non-measurement.
+        self._check_vision_capability()
         self._detector = detector
         self._two_clock = bool(two_clock)
         self._monitor_decisions = int(monitor_decisions)
@@ -145,6 +178,36 @@ class LLMController:
             self._tools = self._tools_full
             self._tool_registry = ToolRegistry(self._tools)
 
+    # -- vision gating --------------------------------------------------- #
+    def _check_vision_capability(self) -> None:
+        """Refuse a vision-requiring run on a model that cannot receive an image.
+
+        Two configurations need pixels: `use_vision=True`, which attaches the
+        rendered frame to every observation, and any tier other than "privileged",
+        which withdraws the ground-truth object queries so the scene can only be
+        read through detect/point_at. Paired with a text-only model -- DeepSeek's
+        chat and reasoner endpoints, for instance -- both used to run to completion
+        and report a success rate, a cost and a failure mode for a model that was
+        asked to look at something it never received. That number is not a low
+        score, it is not a score at all, and nothing on the way out said so.
+
+        Called from __init__ and again from run(), because the tier and vision flag
+        are plain attributes an examples script can set after construction.
+        """
+        if not (self._use_vision or self._tier != "privileged"):
+            return
+        if self._allow_blind_vision or is_offline_llm(self._llm):
+            return
+        model = model_id_of(self._llm)
+        if model is None:
+            # A hand-written client that never names its model cannot be checked
+            # against the capability table; say so rather than implying it passed.
+            log.warning("cannot verify image support: LLM client %r reports no model "
+                        "name, so this vision run is unchecked",
+                        getattr(self._llm, "name", type(self._llm).__name__))
+            return
+        check_vision_config(model, use_vision=self._use_vision, tier=self._tier)
+
     # -- llm accounting -------------------------------------------------- #
     def _complete(self, messages, **kw):
         """Call the LLM, recording tokens and cost.
@@ -177,6 +240,7 @@ class LLMController:
 
     # -- main loop ------------------------------------------------------- #
     def run(self, env: Env, *, seed: Optional[int] = None) -> Episode:
+        self._check_vision_capability()
         self._usage = TokenUsage()
         self._cost_usd = 0.0
         self._cost_known = True

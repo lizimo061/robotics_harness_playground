@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from harness.agent.llm_controller import LLMController
+from harness.agent.llm_controller import LLMController, is_offline_llm, model_id_of
 from harness.config import HarnessConfig, VizConfig
 from harness.envs.registry import get_env
 from harness.eval.logger import TrajectoryLogger
@@ -17,6 +17,7 @@ from harness.eval.results import (
     record_from_episode,
     write_per_instance_details,
 )
+from harness.llm.capabilities import check_vision_config
 from harness.llm.registry import get_llm
 from harness.types import Episode
 from harness.utils.logging import get_logger
@@ -69,6 +70,33 @@ def _write_episode_video(frames: list, cfg, index: int, seed: int,
     return out
 
 
+def _check_vision_config(cfg: HarnessConfig, llm) -> None:
+    """Refuse a config that needs pixels but names a model that cannot see them.
+
+    The controller checks itself too, but only against what it is handed, and
+    `agent.tier` is a config field the controller does not receive here -- so a
+    `tier: perception` run against deepseek-chat would otherwise sail straight
+    past the gate and report a success rate for an agent whose only route to an
+    object's location (detect/point_at over the frame) it could not use.
+
+    Escape hatches, in order: the mock provider (offline, scripted), and
+    `agent.extra.allow_blind_vision: true` for a deliberate blind run.
+    """
+    tier = str(cfg.agent.extra.get("tier", cfg.agent.tier) or "privileged")
+    if not (cfg.agent.use_vision or tier != "privileged"):
+        return
+    if bool(cfg.agent.extra.get("allow_blind_vision")) or is_offline_llm(llm):
+        return
+    # Prefer what the client will actually send: cfg.llm.model is often blank and
+    # the provider fills in its own default (deepseek -> deepseek-chat).
+    model = model_id_of(llm) or cfg.llm.model
+    if not model:
+        log.warning("cannot verify image support: provider %r reports no model name, "
+                    "so this vision run is unchecked", cfg.llm.provider)
+        return
+    check_vision_config(model, use_vision=cfg.agent.use_vision, tier=tier)
+
+
 def run_eval(cfg: HarnessConfig) -> dict:
     """Run the configured episodes and return a summary dict."""
     set_seed(cfg.seed)
@@ -103,6 +131,9 @@ def run_eval(cfg: HarnessConfig) -> dict:
         agent = get_baseline_agent(baseline, max_steps=cfg.agent.max_steps, **cfg.agent.extra)
         model_id = "oracle" if baseline.startswith("oracle") else "null"
     else:
+        # Only the LLM path can be fooled by a blind model; the baselines above
+        # never look at a frame.
+        _check_vision_config(cfg, llm)
         agent = LLMController(
             llm,
             mode=cfg.agent.mode,

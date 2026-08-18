@@ -34,6 +34,7 @@ class ModelCaps:
     price_cache_read: USD per 1M cached-read tokens. Providers differ sharply
         here -- Anthropic discounts ~10x, DeepSeek ~31x -- so a single global
         multiplier misprices badly. Falls back to _CACHE_READ_MULT when unset.
+    vision:          whether the model accepts image blocks at all.
     """
 
     sampling_params: bool = True
@@ -44,45 +45,56 @@ class ModelCaps:
     price_in: Optional[float] = None
     price_out: Optional[float] = None
     price_cache_read: Optional[float] = None
+    #: Defaults to False on purpose, unlike every other field here. The rest of
+    #: this dataclass is permissive so an unlisted model still runs; vision is
+    #: the opposite, because a wrong True is silent. A text-only model handed an
+    #: image either 400s or -- worse -- answers from the text alone, and the run
+    #: still looks like a vision evaluation. False makes an unverified model
+    #: refuse a vision run instead of producing a publishable-looking zero.
+    vision: bool = False
 
 
 # Anthropic, verified against the published model table.
 # Sampling params are rejected from Opus 4.7 / Sonnet 5 onward.
+#
+# vision=True throughout: every Claude model the API has served since Claude 3
+# accepts base64 image blocks alongside text, and this harness sends exactly
+# that shape (see ChatMessage.to_anthropic). No Claude entry here is text-only.
 _ANTHROPIC: dict[str, ModelCaps] = {
     "claude-fable-5": ModelCaps(
-        sampling_params=False, thinking="adaptive", effort=True,
+        sampling_params=False, thinking="adaptive", effort=True, vision=True,
         max_output=128_000, context=1_000_000, price_in=10.0, price_out=50.0,
     ),
     "claude-mythos-5": ModelCaps(
-        sampling_params=False, thinking="adaptive", effort=True,
+        sampling_params=False, thinking="adaptive", effort=True, vision=True,
         max_output=128_000, context=1_000_000, price_in=10.0, price_out=50.0,
     ),
     "claude-opus-5": ModelCaps(
-        sampling_params=False, thinking="adaptive", effort=True,
+        sampling_params=False, thinking="adaptive", effort=True, vision=True,
         max_output=128_000, context=1_000_000, price_in=5.0, price_out=25.0,
     ),
     "claude-opus-4-8": ModelCaps(
-        sampling_params=False, thinking="adaptive", effort=True,
+        sampling_params=False, thinking="adaptive", effort=True, vision=True,
         max_output=128_000, context=1_000_000, price_in=5.0, price_out=25.0,
     ),
     "claude-opus-4-7": ModelCaps(
-        sampling_params=False, thinking="adaptive", effort=True,
+        sampling_params=False, thinking="adaptive", effort=True, vision=True,
         max_output=128_000, context=1_000_000, price_in=5.0, price_out=25.0,
     ),
     "claude-opus-4-6": ModelCaps(
-        sampling_params=True, thinking="adaptive", effort=True,
+        sampling_params=True, thinking="adaptive", effort=True, vision=True,
         max_output=128_000, context=1_000_000, price_in=5.0, price_out=25.0,
     ),
     "claude-sonnet-5": ModelCaps(
-        sampling_params=False, thinking="adaptive", effort=True,
+        sampling_params=False, thinking="adaptive", effort=True, vision=True,
         max_output=128_000, context=1_000_000, price_in=3.0, price_out=15.0,
     ),
     "claude-sonnet-4-6": ModelCaps(
-        sampling_params=True, thinking="adaptive", effort=True,
+        sampling_params=True, thinking="adaptive", effort=True, vision=True,
         max_output=128_000, context=1_000_000, price_in=3.0, price_out=15.0,
     ),
     "claude-haiku-4-5": ModelCaps(
-        sampling_params=True, thinking="budget",
+        sampling_params=True, thinking="budget", vision=True,
         max_output=64_000, context=200_000, price_in=1.0, price_out=5.0,
     ),
 }
@@ -95,6 +107,11 @@ _ANTHROPIC: dict[str, ModelCaps] = {
 # than Anthropic's ~10x. Peak is the conservative choice -- for a cost
 # comparison, overstating is far safer than understating, and an off-peak run
 # simply comes in under the reported figure.
+#
+# vision stays at its default False for both: DeepSeek's chat-completions models
+# are text-only as far as this repo has verified, and nothing here has ever been
+# observed accepting an image block. If a served v4 model does take images, the
+# fix is one flag plus the evidence -- not an optimistic default.
 _DEEPSEEK: dict[str, ModelCaps] = {
     "deepseek-v4-pro": ModelCaps(
         max_output=384_000, context=1_000_000,
@@ -113,9 +130,14 @@ _DEEPSEEK: dict[str, ModelCaps] = {
 # Prices stay None deliberately: an alias can be repointed server-side at any
 # time, and estimate_cost() prices the model named in the *response*, so a
 # served v4 model is billed correctly without trusting the alias.
+#
+# vision=False is explicit rather than inherited, because these two aliases are
+# the ones this repo's configs actually name: DeepSeek's chat and reasoner
+# endpoints take text only. Sending them a frame does not error loudly -- the
+# model answers from the text and the run reads like a failed vision eval.
 _OTHER: dict[str, ModelCaps] = {
-    "deepseek-chat": ModelCaps(max_output=384_000, context=1_000_000),
-    "deepseek-reasoner": ModelCaps(max_output=384_000, context=1_000_000),
+    "deepseek-chat": ModelCaps(max_output=384_000, context=1_000_000, vision=False),
+    "deepseek-reasoner": ModelCaps(max_output=384_000, context=1_000_000, vision=False),
 }
 
 _DEFAULT = ModelCaps()
@@ -137,6 +159,82 @@ def get_caps(model: str) -> ModelCaps:
     if matches:
         return table[max(matches, key=len)]
     return _DEFAULT
+
+
+def supports_vision(model: str) -> bool:
+    """Whether `model` is known to accept image input.
+
+    Unknown models answer False. That is not a claim that they are blind -- it is
+    a refusal to assume they can see. Vision support cannot be probed cheaply and
+    a wrong "yes" is invisible: a text-only model handed a rendered frame either
+    rejects the request or replies from the text alone, and the resulting zero is
+    indistinguishable from genuine incapability. So the burden of proof sits on
+    the model: add it to the tables above, with the evidence, to run vision.
+    """
+    return get_caps(model).vision
+
+
+class VisionUnsupportedError(ValueError):
+    """A run that needs pixels was pointed at a model that cannot receive them.
+
+    Raised instead of warned. The failure this closes is silent by construction:
+    ``use_vision=True`` on deepseek-chat, or the ``perception`` tier (which
+    withdraws the ground-truth object queries and leaves only detect/point_at
+    over the image), produces a complete-looking episode, a real success rate and
+    a real cost -- all of it measuring a model that was never shown the scene.
+    """
+
+
+def check_vision_config(
+    model: str,
+    *,
+    use_vision: bool = False,
+    tier: str = "privileged",
+) -> None:
+    """Raise VisionUnsupportedError if this configuration needs a sighted model.
+
+    A configuration needs vision when ``use_vision`` is set (the camera frame is
+    attached to every observation) or when the tier is anything but
+    ``privileged`` (ground-truth queries are withdrawn, so the only way to locate
+    an object is to look at it). Either paired with a text-only model is a
+    meaningless evaluation, so it is refused up front rather than reported.
+    """
+    tier = str(tier or "privileged")
+    reasons = []
+    if use_vision:
+        reasons.append("use_vision=True attaches the camera frame to every observation")
+    if tier != "privileged":
+        reasons.append(
+            f"tier={tier!r} withdraws the ground-truth object queries, leaving "
+            "detect/point_at over the image as the only way to locate anything"
+        )
+    if not reasons:
+        return
+    if supports_vision(model):
+        return
+    # "recorded as text-only" and "never recorded at all" are different claims,
+    # and only the second one is the harness's ignorance rather than the model's
+    # limitation. get_caps falls back to _DEFAULT, so identity tells them apart --
+    # and a suffixed id that prefix-matches a real entry counts as recorded.
+    known = get_caps(model) is not _DEFAULT
+    verdict = (
+        # Phrased as a fact about the table, not about the vendor: the table is
+        # what the harness can defend, and every entry cites its evidence.
+        f"model {model!r} is recorded as text-only (no image input)"
+        if known
+        else f"model {model!r} is not in the capability table, so its image support is unverified"
+    )
+    raise VisionUnsupportedError(
+        f"{verdict}, but this run requires vision: "
+        + "; ".join(reasons)
+        + ". A blind model scores zero here for the wrong reason, and the result "
+        "looks publishable. Fix one of: (a) run a vision-capable model "
+        "(any Anthropic claude-* model in harness/llm/capabilities.py); "
+        "(b) drop to tier='privileged' with use_vision=False for a text-only, "
+        "ground-truth run; (c) if you know this model can see, add vision=True "
+        "to its ModelCaps entry along with the evidence; (d) for offline plumbing "
+        "tests only, use the mock provider or pass allow_blind_vision=True."
+    )
 
 
 @dataclass
