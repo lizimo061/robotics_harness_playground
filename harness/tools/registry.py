@@ -41,6 +41,41 @@ class ToolRegistry:
         return list(self._tools.values())
 
 
+#: Which query tools each scaffolding tier exposes. The motion tools are the same in
+#: every tier -- the variable under study is what the agent can KNOW, not what it can
+#: do. Naming the tiers after CaP-X's ladder keeps the comparison legible.
+TIERS = ("privileged", "perception")
+
+#: tools that read simulator ground truth
+_PRIVILEGED_QUERIES = ("get_object_position", "list_objects", "list_goals",
+                       "list_obstacles")
+
+
+def tools_for_tier(tools, tier: str, detector=None) -> list:
+    """Filter a toolset to a scaffolding tier, adding perception tools as needed.
+
+    ``privileged`` keeps the ground-truth queries (the default, and what every result
+    in this repo before now was measured with). ``perception`` removes them and offers
+    ``detect``/``point_at`` instead, so object locations must be *looked up by
+    looking*. Motion, gripper and `done` tools are untouched in both.
+
+    A gap between the two tiers on the same task is the CaP-X measurement: how much of
+    a score was the designer's scaffolding rather than the agent.
+    """
+    tier = str(tier or "privileged").lower()
+    if tier not in TIERS:
+        raise ValueError(f"unknown tier {tier!r}; expected one of {list(TIERS)}")
+    if tier == "privileged":
+        return list(tools)
+    if detector is None:
+        raise ValueError("tier 'perception' needs a detector; pass detector=... "
+                         "(see harness.perception.detect.get_detector)")
+    from harness.tools.perception_tools import DetectTool, PointAtTool
+
+    kept = [t for t in tools if t.name not in _PRIVILEGED_QUERIES]
+    return [*kept, DetectTool(detector), PointAtTool(detector)]
+
+
 def get_default_tools(policy=None, **policy_kwargs) -> list[Tool]:
     """The standard toolset; prepends run_policy when a policy is supplied."""
     tools: list[Tool] = []

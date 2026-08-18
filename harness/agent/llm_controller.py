@@ -15,7 +15,7 @@ per-step observation, prompt, response, action, reward and rendered frame.
 """
 from __future__ import annotations
 
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from harness.agent.action_parser import parse_action
 from harness.agent.code_executor import execute_code
@@ -84,6 +84,8 @@ class LLMController:
         #: default so existing runs are byte-identical; see harness/agent/context.py.
         two_clock: bool = False,
         monitor_decisions: int = 4,
+        tier: str = "privileged",
+        detector: Any = None,
         system_prompt: str = "",
         temperature: Optional[float] = None,
         task_description: str = "",
@@ -99,6 +101,8 @@ class LLMController:
         self._max_steps = max_steps
         self._use_vision = use_vision
         self._warned_no_image = False
+        self._tier = str(tier or "privileged")
+        self._detector = detector
         self._two_clock = bool(two_clock)
         self._monitor_decisions = int(monitor_decisions)
         self._transcript = None
@@ -196,6 +200,14 @@ class LLMController:
             from harness.tools import ToolRegistry
 
             self._tools = self._filter_tools_for_env(env)
+            if self._tier and self._tier != "privileged":
+                from harness.tools.registry import tools_for_tier
+
+                detector = self._detector
+                binder = getattr(detector, "bind", None)
+                if binder is not None:
+                    binder(env)
+                self._tools = tools_for_tier(self._tools, self._tier, detector)
             self._tool_registry = ToolRegistry(self._tools)
 
         task = self._task_description or self._default_task(env)
