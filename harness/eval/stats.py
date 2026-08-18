@@ -37,17 +37,30 @@ def beta_ci(k: int, n: int, confidence: float = 0.95) -> tuple[float, float]:
 
     Falls back to a Wilson score interval when scipy is absent; the two agree
     closely, and Wilson shares the properties that matter here.
+
+    At the boundaries the interval is made **one-sided**, which is the standard
+    convention and not a cosmetic choice. An equal-tailed interval at k=0 puts
+    2.5% of the posterior mass below the observed rate, so it returns something
+    like [0.1%, 11.2%] for a model that scored 0/30 -- an interval that excludes
+    its own point estimate. Reported next to a bar of length zero that reads as
+    a bug in the harness, and a reader cannot tell "scored zero" from "we are
+    unsure it is zero". Spending the whole alpha on the side where the
+    uncertainty actually lives gives [0, 9.3%]: the claim we can support.
     """
     if n <= 0:
         return 0.0, 1.0
     k = max(0, min(int(k), int(n)))
     alpha = 1.0 - confidence
-    if _has_scipy():
-        from scipy.stats import beta as _beta
+    if not _has_scipy():
+        return wilson_ci(k, n, confidence=confidence)
+    from scipy.stats import beta as _beta
 
-        lo, hi = _beta.ppf([alpha / 2, 1 - alpha / 2], k + 1, n - k + 1)
-        return float(lo), float(hi)
-    return wilson_ci(k, n, confidence=confidence)
+    if k == 0:  # one-sided: all of alpha goes to the upper tail
+        return 0.0, float(_beta.ppf(confidence, k + 1, n - k + 1))
+    if k == n:
+        return float(_beta.ppf(alpha, k + 1, n - k + 1)), 1.0
+    lo, hi = _beta.ppf([alpha / 2, 1 - alpha / 2], k + 1, n - k + 1)
+    return float(lo), float(hi)
 
 
 def wilson_ci(k: int, n: int, confidence: float = 0.95) -> tuple[float, float]:
@@ -55,11 +68,15 @@ def wilson_ci(k: int, n: int, confidence: float = 0.95) -> tuple[float, float]:
     if n <= 0:
         return 0.0, 1.0
     z = _Z95 if abs(confidence - 0.95) < 1e-9 else _z_for(confidence)
+    k = max(0, min(int(k), int(n)))
     p = k / n
     denom = 1.0 + z * z / n
     centre = (p + z * z / (2 * n)) / denom
     half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
-    return max(0.0, centre - half), min(1.0, centre + half)
+    lo, hi = max(0.0, centre - half), min(1.0, centre + half)
+    # Snap the boundaries exactly: rounding leaves hi at 0.9999999999999999 for
+    # k == n, which puts the observed 1.0 outside its own interval.
+    return (0.0 if k == 0 else lo), (1.0 if k == n else hi)
 
 
 def _z_for(confidence: float) -> float:

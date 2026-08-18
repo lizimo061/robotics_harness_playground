@@ -53,21 +53,16 @@ class TabletopEnv(Env):
         self._steps = 0
         self._trail: list = []
 
-        self.task_spec = task_spec if task_spec is not None else generate_task(task, seed=seed, difficulty=difficulty)
-        self._objects: dict[str, np.ndarray] = {}
-        self._targets: dict[str, str] = {}
-        self._roles: dict[str, str] = {}
-        for o in self.task_spec.objects:
-            name = o["name"]
-            self._objects[name] = np.asarray(o["pos"], dtype=float)
-            if o.get("target"):
-                self._targets[name] = o["target"]
-            if o.get("role"):
-                self._roles[name] = o["role"]
-        #: pristine copy of the initial layout, restored on every reset()
-        self._objects_home = {k: v.copy() for k, v in self._objects.items()}
-        self._goals: dict[str, np.ndarray] = {k: np.asarray(v, dtype=float) for k, v in self.task_spec.goals.items()}
-        self._obstacles: list[dict] = [dict(o) for o in self.task_spec.obstacles]
+        #: the task name, kept so reset(seed=) can regenerate the layout
+        self._task_name = task
+        #: only a layout we generated may be regenerated -- an explicitly supplied
+        #: task_spec is the caller's, and silently replacing it would be worse
+        #: than ignoring the seed.
+        self._layout_is_ours = task_spec is None
+        self._layout_seed = seed
+        self._adopt_spec(
+            task_spec if task_spec is not None
+            else generate_task(task, seed=seed, difficulty=difficulty))
 
         self._ee_home = np.asarray(self.task_spec.ee_start, dtype=float)
         self._ee = self._ee_home.copy()
@@ -103,10 +98,39 @@ class TabletopEnv(Env):
             description="move by (dx, dy) in [-0.25, 0.25]; set gripper 0 (open) or 1 (close).",
         )
 
+    def _adopt_spec(self, spec) -> None:
+        """Install a task spec as the current layout."""
+        self.task_spec = spec
+        self._objects: dict[str, np.ndarray] = {}
+        self._targets: dict[str, str] = {}
+        self._roles: dict[str, str] = {}
+        for o in spec.objects:
+            name = o["name"]
+            self._objects[name] = np.asarray(o["pos"], dtype=float)
+            if o.get("target"):
+                self._targets[name] = o["target"]
+            if o.get("role"):
+                self._roles[name] = o["role"]
+        #: pristine copy of the initial layout, restored on every reset()
+        self._objects_home = {k: v.copy() for k, v in self._objects.items()}
+        self._goals: dict[str, np.ndarray] = {
+            k: np.asarray(v, dtype=float) for k, v in spec.goals.items()}
+        self._obstacles: list[dict] = [dict(o) for o in spec.obstacles]
+
     # -- lifecycle -------------------------------------------------------- #
     def reset(self, *, seed: Optional[int] = None) -> Obs:
         if seed is not None:
             self._rng = np.random.default_rng(seed)
+            # Regenerate the layout, not just the RNG. Reseeding alone left every
+            # seed with the byte-identical episode built at construction time, so
+            # a grid of N seeds was the same trial N times -- pseudo-replication
+            # that shrinks every confidence interval by roughly sqrt(N) while
+            # looking like real sampling.
+            if self._layout_is_ours and seed != self._layout_seed:
+                self._adopt_spec(generate_task(self._task_name, seed=seed,
+                                               difficulty=self._difficulty))
+                self._ee_home = np.asarray(self.task_spec.ee_start, dtype=float)
+                self._layout_seed = seed
         # Restore object poses, not just the arm. step() carries a grasped
         # object by writing self._objects[name], so without this an episode
         # inherits the previous one's layout: once a task is solved the object

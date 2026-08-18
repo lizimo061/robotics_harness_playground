@@ -87,10 +87,14 @@ class RunPolicyTool(Tool):
         ran = 0
         success = False
         stopped = "budget exhausted"
-        image = env.render() if self._use_vision else None
 
         for _ in range(budget):
             obs_text = env.get_text_state() or ""
+            # Refresh the frame every step. Rendering once before the loop fed the
+            # policy the same initial image for the whole rollout, which for a
+            # visuomotor policy means acting blind on a stale observation -- the
+            # scene it is closing the loop on stopped existing after step 1.
+            image = env.render() if self._use_vision else None
             try:
                 vec = self._policy.act(obs_text, image=image)
             except Exception as e:  # noqa: BLE001 - surface policy failures to the LLM

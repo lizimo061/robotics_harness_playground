@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -62,7 +63,28 @@ def _print_leaderboard(summary: dict) -> None:
     print(f"\nresults: {summary.get('job_dir') or summary.get('run_dir')}")
 
 
+#: Subcommand names. A bare `harness <config.yaml>` must keep working, so the
+#: first token is routed by hand: argparse matches a leading positional against
+#: the subparser choices and rejects anything else, which broke the original
+#: single-config surface the moment `job` was added.
+_SUBCOMMANDS = ("job", "report")
+
+
 def main(argv: Optional[Sequence[str]] = None) -> None:
+    tokens = list(sys.argv[1:] if argv is None else argv)
+    if tokens and not tokens[0].startswith("-") and tokens[0] not in _SUBCOMMANDS:
+        single = argparse.ArgumentParser(prog="harness",
+                                         description="Run one (env, model) evaluation.")
+        single.add_argument("config", help="path to a YAML or JSON config file")
+        single.add_argument("--episodes", type=int, default=None,
+                            help="override the episode count")
+        one = single.parse_args(tokens)
+        cfg = load_config(one.config)
+        if one.episodes is not None:
+            cfg.eval.episodes = one.episodes
+        run_eval(cfg)
+        return
+
     parser = argparse.ArgumentParser(description="Run a robotics harness task or job.")
     sub = parser.add_subparsers(dest="command")
 
@@ -73,6 +95,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     job.add_argument("--concurrency", type=int, default=None)
     job.add_argument("--summary-only", action="store_true",
                      help="re-aggregate an existing job from disk without running trials")
+    job.add_argument("--report", nargs="?", const="", default=None,
+                     metavar="PATH",
+                     help="also write an HTML leaderboard (default: <job dir>/report.html)")
+
+    rep = sub.add_parser("report", help="render an HTML leaderboard from a finished job")
+    rep.add_argument("job_dir", help="path to a job directory")
+    rep.add_argument("-o", "--out", default=None, help="output HTML path")
+    rep.add_argument("--title", default="", help="page title")
 
     # default (no subcommand): single-config evaluation
     parser.add_argument("config", nargs="?", help="path to a YAML or JSON config file")
@@ -91,6 +121,17 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         else:
             summary = run_job(cfg, resume=not args.no_resume)
         _print_leaderboard(summary)
+        if args.report is not None:
+            from harness.eval.report import write_report
+
+            path = write_report(cfg.dir, args.report or None)
+            print(f"report:  {path}")
+        return
+
+    if args.command == "report":
+        from harness.eval.report import write_report
+
+        print(write_report(args.job_dir, args.out, title=args.title))
         return
 
     if not args.config:

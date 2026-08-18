@@ -1,4 +1,8 @@
 # RoboLab (Isaac Lab) task via the harness agent.
+#
+# Task names must exist in the installed RoboLab's registry -- it has 120 of them
+# and no "PickCubeTask", which this config used to name. RoboLabEnv raises with
+# the full list, so run any task name through it once rather than guessing.
 # NOTE: run through examples/run_robolab.py (which sets up the Isaac Sim
 # AppLauncher), NOT the generic CLI. This config documents the env/agent shape.
 seed: 0
@@ -9,8 +13,8 @@ llm:
   api_key_env: DEEPSEEK_API_KEY
 
 env:
-  name: "robolab:PickCubeTask"
-  task: PickCubeTask
+  name: "robolab:RubiksCubeTask"
+  task: RubiksCubeTask
   params:
     device: cuda:0
     action_mode: ee_delta

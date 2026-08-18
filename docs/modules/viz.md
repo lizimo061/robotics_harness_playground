@@ -24,3 +24,18 @@ viz.enabled / backend (html|console|live|none) / output / fps / capture_frames.
 
 ## Related
 - modules/agent.md (recording), modules/eval.md (logging), concepts.md.
+
+## Per-episode video
+
+Set `viz.video` to write one video file per episode alongside the HTML trace:
+
+```yaml
+viz: {enabled: true, backend: html, output: logs/run.html, video: logs/vid/run.mp4, fps: 2}
+```
+
+The episode index, seed and outcome are appended to the stem
+(`run_ep0_seed0_fail.mp4`), so the failure case is identifiable without opening
+every file. Frames are sliced per episode -- the recorder accumulates across an
+episode loop, so writing once at the end would splice every episode into one
+video with no boundary. An env whose `render()` returns None logs a warning
+rather than silently producing nothing.

@@ -93,12 +93,16 @@ class LLMController:
         self._mode = mode
         self._max_steps = max_steps
         self._use_vision = use_vision
+        self._warned_no_image = False
         self._system_prompt_override = system_prompt
         self._temperature = temperature
         self._task_description = task_description
         self._recorder = recorder
         self._on_step = on_step
-        self._capture_frames = (recorder is not None and recorder.capture_frames) or on_step is not None
+        # use_vision belongs here too: without it no frame is rendered, so asking
+        # for vision produced a text-only prompt with nothing to attach.
+        self._capture_frames = ((recorder is not None and recorder.capture_frames)
+                               or on_step is not None or use_vision)
 
         # token / cost accounting, reset per episode in run()
         self._usage = TokenUsage()
@@ -150,6 +154,12 @@ class LLMController:
 
     def _record_usage(self, ep: Episode) -> None:
         ep.metadata["llm_calls"] = self._llm_calls
+        # The budget is in LLM turns, not environment steps -- a query tool
+        # consumes a turn without stepping the env, and one skill can step it
+        # many times. Recording it lets classify_failure tell "spent the whole
+        # budget" apart from "acted and got it wrong"; without it that branch
+        # never fired and every exhausted budget was filed as task_failed.
+        ep.metadata["max_steps"] = self._max_steps
         ep.metadata["usage"] = self._usage.to_dict()
         ep.metadata["cost_usd"] = round(self._cost_usd, 6) if self._cost_known else None
 
@@ -224,13 +234,7 @@ class LLMController:
                 continue
 
             user_text = build_observation_message(obs_text=obs_text, step=step, max_steps=self._max_steps)
-            if self._use_vision and obs.image is not None:
-                from harness.perception.vision import encode_image
-
-                b64 = encode_image(obs.image)
-                messages.append(ChatMessage.user_vision(user_text, b64))
-            else:
-                messages.append(ChatMessage.user(user_text))
+            messages.append(self._observation_message(user_text, obs, frame))
 
             prompt = _serialize_messages(messages)
             resp = self._complete(messages, temperature=self._temperature)
@@ -280,11 +284,34 @@ class LLMController:
             self._recorder.finish(success=ep.success, total_reward=ep.total_reward)
         return ep
 
+    def _observation_message(self, obs_text: str, obs, frame) -> ChatMessage:
+        """The per-turn observation, with the camera frame attached when asked for.
+
+        Tools mode used to append text unconditionally, so `use_vision: true` with
+        `mode: tools` was a silent no-op -- the flag was accepted, forwarded into
+        the policy options, and the model never received a pixel. Silent
+        degradation is worse than an error: every run looked like a vision run.
+        """
+        if not self._use_vision:
+            return ChatMessage.user(obs_text)
+        image = getattr(obs, "image", None)
+        if image is None:
+            image = frame
+        if image is None:
+            if not self._warned_no_image:
+                self._warned_no_image = True
+                log.warning("use_vision is set but the environment produced no frame; "
+                            "sending text only -- this is NOT a vision evaluation")
+            return ChatMessage.user(obs_text)
+        from harness.perception.vision import encode_image
+
+        return ChatMessage.user_vision(obs_text, encode_image(image))
+
     # -- tools mode ------------------------------------------------------ #
     def _tools_step(self, env, ep, messages, obs, obs_text, step, frame) -> None:
         from harness.tools import parse_tool_call
 
-        messages.append(ChatMessage.user(obs_text))
+        messages.append(self._observation_message(obs_text, obs, frame))
         prompt = _serialize_messages(messages)
         resp = self._complete(messages, temperature=self._temperature)
         messages.append(ChatMessage.assistant(resp.content))

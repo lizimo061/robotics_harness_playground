@@ -32,9 +32,11 @@ from harness.types import Action, Episode
 
 class TestStats(unittest.TestCase):
     def test_beta_ci_matches_published_reference_values(self):
-        # RoboLab documents these exact intervals for its estimator.
-        for k, n, lo, hi in [(0, 10, 0.002, 0.285), (6, 10, 0.308, 0.833),
-                             (10, 10, 0.715, 0.998), (60, 100, 0.499, 0.694)]:
+        # RoboLab documents these exact intervals for its estimator. Only the
+        # interior cases are compared: at k=0 and k=n we deliberately switch to a
+        # one-sided interval (see the boundary test below), so the equal-tailed
+        # reference values there do not apply.
+        for k, n, lo, hi in [(6, 10, 0.308, 0.833), (60, 100, 0.499, 0.694)]:
             got = beta_ci(k, n)
             self.assertAlmostEqual(got[0], lo, places=2, msg=f"{k}/{n} lower")
             self.assertAlmostEqual(got[1], hi, places=2, msg=f"{k}/{n} upper")
@@ -44,6 +46,27 @@ class TestStats(unittest.TestCase):
         lo, hi = beta_ci(10, 10)
         self.assertGreater(lo, 0.0)
         self.assertLessEqual(hi, 1.0)
+
+    def test_interval_always_contains_its_own_point_estimate(self):
+        """The property that forced the one-sided boundary convention.
+
+        An equal-tailed interval at k=0 returns something like [0.2%, 28.5%] --
+        it excludes the observed 0%. Rendered beside a bar of length zero that
+        reads as a harness bug, and it blurs "scored zero" into "we are unsure it
+        is zero". Both estimators must bracket what was measured.
+        """
+        for estimator in (beta_ci, wilson_ci):
+            for k, n in [(0, 1), (1, 1), (0, 10), (10, 10), (0, 30), (30, 30), (2, 5)]:
+                lo, hi = estimator(k, n)
+                with self.subTest(estimator=estimator.__name__, k=k, n=n):
+                    self.assertLessEqual(lo, k / n)
+                    self.assertLessEqual(k / n, hi)
+
+    def test_boundary_intervals_are_one_sided(self):
+        self.assertEqual(beta_ci(0, 30)[0], 0.0)
+        self.assertEqual(beta_ci(30, 30)[1], 1.0)
+        # ...and spending all of alpha on one tail tightens that tail
+        self.assertLess(beta_ci(0, 30)[1], 0.10)
 
     def test_beta_ci_degenerate_n(self):
         self.assertEqual(beta_ci(0, 0), (0.0, 1.0))
@@ -138,8 +161,19 @@ class TestFailureClassification(unittest.TestCase):
         self.assertEqual(classify_failure(Episode(success=True)), FailureMode.NONE)
 
     def test_all_unparseable_replies_is_a_parse_failure_not_a_capability_one(self):
-        ep = Episode(actions=[Action(kind="noop"), Action(kind="noop")])
+        ep = Episode(actions=[Action(kind="noop"), Action(kind="noop")],
+                     metadata={"llm_calls": 2})
         self.assertEqual(classify_failure(ep), FailureMode.PARSE_FAILURE)
+
+    def test_a_baselines_deliberate_inaction_is_not_a_parse_failure(self):
+        """The null agent emits noops by design.
+
+        Classifying that as a format failure both slanders the harness and puts
+        100% of the baseline's trials into not_model_fault, so a healthy board
+        reports a wall of harness faults it did not cause.
+        """
+        ep = Episode(actions=[Action(kind="noop"), Action(kind="noop")])
+        self.assertNotEqual(classify_failure(ep), FailureMode.PARSE_FAILURE)
 
     def test_real_actions_that_miss_are_task_failures(self):
         ep = Episode(actions=[Action(kind="ee_pose", value=[0.1, 0.2])])
