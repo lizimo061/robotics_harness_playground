@@ -21,17 +21,24 @@ from harness.tools.policy_tool import AbortPolicyTool, ContinuePolicyTool, RunPo
 
 
 class _CountingPolicy:
-    """Records how many act() calls it saw, so chunking is observable."""
+    """Records how many act() calls it saw, so chunking is observable.
+
+    `calls` is per-rollout and reset() clears it, mirroring a real policy dropping
+    its cached chunk. `total` spans resets, so a test can ask "did it act again?"
+    without the reset erasing the evidence.
+    """
 
     def __init__(self, dim=2):
         self.dim = dim
         self.calls = 0
+        self.total = 0
 
     def begin(self, instruction, action_space=None):
         self.instruction = instruction
 
     def act(self, observation_text, image=None):
         self.calls += 1
+        self.total += 1
         return np.zeros(self.dim, dtype=np.float32)
 
     def reset(self):
@@ -125,9 +132,9 @@ class TestPreemption(unittest.TestCase):
         tool = RunPolicyTool(pol, default_steps=50, monitor_every=5)
         env = _env()
         tool.run(env, instruction="go", steps=50)
-        before = pol.calls
+        before = pol.total
         r = tool.abort(env)
-        self.assertEqual(pol.calls, before, "the policy kept acting after abort")
+        self.assertEqual(pol.total, before, "the policy kept acting after abort")
         self.assertIn("holds its current pose", r.feedback)
         env.close()
 
@@ -219,3 +226,74 @@ class TestToolsAreOfferedOnlyWhenUsable(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAbortResetsThePolicy(unittest.TestCase):
+    """Preemption must reach the policy, not just the tool.
+
+    Found by the checkpoint survey: VLA servers cache an action chunk per episode
+    (pi0-family models emit 15 actions where RoboLab consumes 8), and RemotePolicy.reset
+    used to clear only local state. So after abort_policy stopped a rollout, the NEXT
+    sub-instruction could be served leftover actions from the one the agent had just
+    decided was going wrong -- for a few steps, silently. Interruptibility is what made
+    that reachable.
+    """
+
+    class _Recording(_CountingPolicy):
+        def __init__(self):
+            super().__init__()
+            self.resets = 0
+
+        def reset(self):
+            self.resets += 1
+
+    def test_abort_resets_the_policy(self):
+        pol = self._Recording()
+        tool = RunPolicyTool(pol, default_steps=20, monitor_every=5)
+        env = _env()
+        tool.run(env, instruction="go", steps=20)
+        self.assertEqual(pol.resets, 0)
+        tool.abort(env)
+        env.close()
+        self.assertEqual(pol.resets, 1, "abort did not reset the policy")
+
+    def test_a_reset_failure_does_not_mask_the_abort(self):
+        class _Bad(self._Recording):
+            def reset(self):
+                raise RuntimeError("server gone")
+
+        tool = RunPolicyTool(_Bad(), default_steps=20, monitor_every=5)
+        env = _env()
+        tool.run(env, instruction="go", steps=20)
+        with self.assertLogs("harness.tools.policy_tool", level="WARNING"):
+            r = tool.abort(env)
+        env.close()
+        self.assertIn("Aborted", r.feedback)
+        self.assertFalse(tool.is_running())
+
+    def test_a_completed_rollout_does_not_reset(self):
+        """Only preemption invalidates a chunk; finishing normally does not."""
+        pol = self._Recording()
+        tool = RunPolicyTool(pol, default_steps=4, monitor_every=0)
+        env = _env()
+        tool.run(env, instruction="go", steps=4)
+        env.close()
+        self.assertEqual(pol.resets, 0)
+
+    def test_remote_reset_crosses_the_wire(self):
+        from unittest import mock
+
+        from harness.policies.remote import RemotePolicy
+        pol = RemotePolicy(base_url="http://x", action_dim=7)
+        with mock.patch.object(pol, "_post") as post:
+            pol.reset()
+        post.assert_called_once()
+        self.assertEqual(post.call_args[0][0], "/reset")
+
+    def test_a_server_without_reset_is_tolerated(self):
+        from unittest import mock
+
+        from harness.policies.remote import RemotePolicy
+        pol = RemotePolicy(base_url="http://x", action_dim=7)
+        with mock.patch.object(pol, "_post", side_effect=RuntimeError("404")):
+            pol.reset()  # must not raise

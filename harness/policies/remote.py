@@ -89,7 +89,24 @@ class RemotePolicy(Policy):
         return np.asarray(vec, dtype=np.float32).ravel()
 
     def reset(self) -> None:
+        """Clear local state AND tell the server, if it will listen.
+
+        A VLA server typically caches an action chunk per episode (pi0-family models
+        emit 15 actions where the env consumes 8). Clearing only the local
+        instruction leaves that chunk alive, so after `abort_policy` stops a rollout
+        the NEXT sub-instruction can be served leftover actions from the one the agent
+        just decided was going wrong -- silently, and only for a few steps, which is
+        the hardest kind of bug to see. Interruptibility made this reachable, so the
+        reset has to cross the wire.
+
+        A server without /reset is fine: the 404 is swallowed, and an
+        implementation that does not cache has nothing to clear anyway.
+        """
         self._instruction = ""
+        try:
+            self._post("/reset", {"env_id": self._env_id})
+        except Exception as e:  # noqa: BLE001 - a missing endpoint must not end a run
+            log.debug("policy server has no usable /reset (%s: %s)", type(e).__name__, e)
 
     # -- transport -------------------------------------------------------- #
     def _post(self, path: str, payload: dict) -> dict:

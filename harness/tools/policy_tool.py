@@ -198,6 +198,14 @@ class RunPolicyTool(Tool):
         state, self._active = self._active, None
         if state is None:
             return ToolResult(feedback="No policy rollout was running.")
+        # Preemption has to reach the policy, not just this object. A VLA server
+        # caching an action chunk would otherwise serve the abandoned
+        # sub-instruction's leftover actions to whatever the agent tries next.
+        try:
+            self._policy.reset()
+        except Exception as e:  # noqa: BLE001 - a reset fault must not mask the abort
+            log.warning("policy.reset() failed during abort (%s: %s)",
+                        type(e).__name__, e)
         return ToolResult(
             feedback=(f"Aborted '{state['instruction']}' after {state['ran']} step(s); "
                       f"the arm holds its current pose.\n" + (env.get_text_state() or "")),
