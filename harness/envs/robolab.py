@@ -62,7 +62,6 @@ class RoboLabEnv(Env):
         try:
             from robolab.core.environments.factory import get_envs  # noqa: F401
             from robolab.core.environments.runtime import create_env, end_episode  # noqa: F401
-            from robolab.registrations.droid.auto_env_registrations_jointpos import auto_register_droid_envs  # noqa: F401
         except ImportError as e:
             raise ImportError(
                 "RoboLab (Isaac Lab / Isaac Sim) is not installed. "
@@ -71,14 +70,18 @@ class RoboLabEnv(Env):
 
         self._create_env = create_env
         self._end_episode = end_episode
-        self._auto_register = auto_register_droid_envs
+
+        # The action mode decides which registration to use, and getting this
+        # wrong is silent. The joint-position flavour takes SEVEN ABSOLUTE JOINT
+        # ANGLES; feeding it a Cartesian (dx, dy, dz) writes those numbers into
+        # joints 1-3 and zeroes the rest, so the arm snaps to the same near-zero
+        # pose every step and never approaches anything. It looks like the model
+        # failing. The IK flavours take Cartesian targets, which is what the
+        # move_to / move_delta tools actually mean.
+        self._auto_register, suffix = self._registrar_for(action_mode)
         self._auto_register()  # populate the env factory
 
-        # resolve the task (exact name, or a tag)
-        resolved = get_envs(task=[task]) if task else get_envs()
-        if not resolved:
-            raise ValueError(f"RoboLab task '{task}' not found in the factory")
-        task_name = resolved[0]
+        task_name = self._resolve_task(get_envs, task, suffix)
 
         self._env, self._env_cfg = self._create_env(
             task_name, device=device, num_envs=num_envs, use_fabric=use_fabric
@@ -92,6 +95,57 @@ class RoboLabEnv(Env):
         self._last_image = None
         self._last_proprio: dict = {}
         self._step_idx = 0
+
+    #: action_mode -> (registration module, function, env-name suffix).
+    #: RoboLab registers one env per flavour and distinguishes them by suffix,
+    #: so the flavour is part of the task name.
+    _REGISTRARS = {
+        "ee_pose": ("robolab.registrations.droid.auto_env_registrations_abs_ik",
+                    "auto_register_droid_abs_ik_envs", "AbsIK"),
+        "ee_delta": ("robolab.registrations.droid.auto_env_registrations_rel_ik",
+                     "auto_register_droid_rel_ik_envs", "RelIK"),
+        "joint_position": ("robolab.registrations.droid.auto_env_registrations_jointpos",
+                           "auto_register_droid_envs", ""),
+    }
+
+    @classmethod
+    def _registrar_for(cls, action_mode: str):
+        import importlib
+
+        if action_mode not in cls._REGISTRARS:
+            raise ValueError(
+                f"unknown action_mode {action_mode!r}; expected one of "
+                f"{sorted(cls._REGISTRARS)}")
+        module_name, func_name, suffix = cls._REGISTRARS[action_mode]
+        module = importlib.import_module(module_name)
+        return getattr(module, func_name), suffix
+
+    @staticmethod
+    def _resolve_task(get_envs, task: str, suffix: str) -> str:
+        """Find the registered env for this task and action flavour.
+
+        A bare task name can match several flavours once more than one is
+        registered, and picking the first would silently hand back a different
+        control interface than the caller asked for.
+        """
+        if not task:
+            found = get_envs()
+            if not found:
+                raise ValueError("no RoboLab tasks are registered")
+            return found[0]
+        wanted = f"{task}{suffix}"
+        for candidate in (wanted, task):
+            found = get_envs(task=[candidate]) or []
+            exact = [f for f in found if str(f) == wanted]
+            if exact:
+                return exact[0]
+        found = get_envs(task=[task]) or []
+        if found:
+            log.warning("no %r variant of %r; falling back to %s -- verify its "
+                        "action space matches the requested mode",
+                        suffix or "joint-position", task, found[0])
+            return found[0]
+        raise ValueError(f"RoboLab task '{task}' not found in the factory")
 
     # -- spaces ----------------------------------------------------------- #
     @property
@@ -321,45 +375,86 @@ class RoboLabEnv(Env):
             self._delta_limit = limit
         return np.clip(delta, -limit, limit).astype(np.float32)
 
+    def _current_quat(self) -> np.ndarray:
+        """Current end-effector orientation as (qw, qx, qy, qz).
+
+        AbsIK commands an absolute pose, so the orientation slots must hold a
+        valid unit quaternion. Zero-filling them (the obvious default) is not a
+        rotation at all and the differential IK diverges, so an agent that only
+        supplies a position keeps whatever orientation it currently has.
+        """
+        q = (self._last_proprio or {}).get("ee_quat")
+        arr = None if q is None else np.asarray(_to_numpy(q), dtype=np.float32).ravel()
+        if arr is None or arr.size < 4 or not np.isfinite(arr[:4]).all():
+            return np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)  # identity
+        arr = arr[:4]
+        norm = float(np.linalg.norm(arr))
+        return arr / norm if norm > 1e-6 else np.array([1.0, 0.0, 0.0, 0.0], np.float32)
+
+    def _pack_action(self, action: Action, dim: int) -> np.ndarray:
+        """Lay the requested motion out the way this action flavour expects.
+
+        Three different contracts, and using the wrong one fails silently:
+          joint_position -> 7 absolute joint angles + gripper
+          ee_pose (AbsIK) -> (x, y, z, qw, qx, qy, qz) + gripper, robot-root frame
+          ee_delta (RelIK) -> (dx, dy, dz, droll, dpitch, dyaw) + gripper
+        """
+        v = action.value
+        v = (np.zeros(0, dtype=np.float32) if v is None
+             else np.asarray(v, dtype=np.float32).ravel())
+        absolute = action.kind in ("ee_pose", "pose", "absolute")
+        relative = action.kind in ("ee_delta", "delta", "move")
+
+        if self._action_mode == "ee_pose":
+            cur = self.get_ee_pos()
+            cur = (np.zeros(3, dtype=np.float32) if cur is None
+                   else np.asarray(cur, dtype=np.float32).ravel()[:3])
+            if absolute and v.size >= 2:
+                target = cur.copy()
+                target[:min(3, v.size)] = v[:min(3, v.size)]
+            elif relative and v.size >= 1:
+                target = cur.copy()
+                target[:min(3, v.size)] += v[:min(3, v.size)]
+            else:
+                target = cur  # hold position (e.g. a pure gripper command)
+            out = np.concatenate([target, self._current_quat()])
+        elif self._action_mode == "ee_delta":
+            delta = np.zeros(3, dtype=np.float32)
+            if absolute and v.size >= 2:
+                cur = self.get_ee_pos()
+                if cur is None:
+                    log.warning("absolute move requested but the end-effector pose "
+                                "is unknown; holding position")
+                else:
+                    cur = np.asarray(cur, dtype=np.float32).ravel()
+                    n = min(3, v.size, cur.size)
+                    delta[:n] = v[:n] - cur[:n]
+            elif v.size:
+                delta[:min(3, v.size)] = v[:min(3, v.size)]
+            clipped = self._clip_delta(delta, dim)
+            # Saturation is invisible to the agent otherwise: it asks to move to a
+            # target, the arm moves a few cm, and nothing says why. Recording it
+            # lets get_text_state() tell the agent to keep going, which turns a
+            # dead end into an iterable control loop.
+            remaining = float(np.linalg.norm(delta - clipped))
+            self._last_move_clipped = remaining > 1e-4
+            self._last_move_remaining = remaining
+            out = np.concatenate([clipped, np.zeros(3, dtype=np.float32)])  # no rotation
+        else:  # joint_position: the values are joint targets already
+            out = v.astype(np.float32, copy=True)
+
+        if action.gripper is not None:
+            out = np.concatenate([out, np.array([float(action.gripper)], np.float32)])
+        return out
+
     def _to_env_action(self, action: Action):
         sp = getattr(self._env, "action_space", None)
         dim = int(np.prod(sp.shape)) if sp is not None and hasattr(sp, "shape") else 0
-        v = action.value
-        if v is None:
-            v = np.zeros(dim, dtype=np.float32)
-        else:
-            v = np.asarray(v, dtype=np.float32).ravel()
+        v = self._pack_action(action, dim)
 
-        # Respect the action *kind*. RoboLab's controller consumes relative
-        # end-effector deltas, so passing an absolute target through unchanged
-        # makes `move_to(0.43, -0.10, 0.03)` a command to jump 43cm -- the agent
-        # can then never deliberately reach anything, and the resulting failures
-        # look like the model's when they are ours.
-        if action.kind in ("ee_pose", "pose", "absolute") and v.size >= 2:
-            current = self.get_ee_pos()
-            if current is None:
-                log.warning("absolute move requested but the end-effector pose is "
-                            "unknown; treating it as a delta")
-            else:
-                cur = np.asarray(current, dtype=np.float32).ravel()
-                target = v[:3] if v.size >= 3 else np.concatenate([v[:2], cur[2:3]])
-                n = min(len(target), len(cur))
-                delta = np.zeros(3, dtype=np.float32)
-                delta[:n] = target[:n] - cur[:n]
-                v = self._clip_delta(delta, dim)
-                # Saturation is invisible to the agent otherwise: it asks to move
-                # to a target, the arm moves 5cm, and nothing says why. Recording
-                # it lets get_text_state() tell the agent to keep going, which
-                # turns a dead end into an iterable control loop.
-                remaining = float(np.linalg.norm(delta[:n] - v[:n]))
-                self._last_move_clipped = remaining > 1e-4
-                self._last_move_remaining = remaining
-        if action.gripper is not None:
-            v = v.copy()
-            if v.size >= 1:
-                v[-1] = float(action.gripper)  # gripper is the last action dim
-            else:
-                v = np.array([float(action.gripper)], dtype=np.float32)
+        if action.gripper is not None and dim and v.size < dim:
+            # pad between the motion block and the gripper, which is the last dim
+            v = np.concatenate([v[:-1], np.zeros(dim - v.size, np.float32), v[-1:]])
         if dim:
             if v.size < dim:
                 v = np.concatenate([v, np.zeros(dim - v.size, dtype=np.float32)])
