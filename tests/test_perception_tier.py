@@ -229,3 +229,75 @@ class TestRemoteDetectorIsSurvivable(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRunnerForwardsTheTier(unittest.TestCase):
+    """The tier must survive the trip from YAML to the agent's toolset.
+
+    An earlier attempt to wire this went in as a string patch whose pattern never
+    matched, so it silently changed nothing: `tier: perception` reached AgentConfig,
+    was validated, and was then dropped before the controller saw it -- the agent kept
+    the privileged toolset while the run was labelled perception. Exactly the kind of
+    mislabelling the rest of this harness works to prevent, so it gets a test.
+    """
+
+    def test_a_perception_config_reaches_the_controller(self):
+        import tempfile
+        from unittest import mock
+
+        from harness.config import AgentConfig, EnvConfig, EvalConfig, HarnessConfig, LLMConfig, VizConfig
+        from harness.runner import run_eval
+
+        seen = {}
+        real_init = None
+
+        with tempfile.TemporaryDirectory() as d:
+            cfg = HarnessConfig(
+                llm=LLMConfig(provider="mock", model="mock-1"),
+                env=EnvConfig(name="tabletop", task="pick_place"),
+                agent=AgentConfig(name="llm_controller", mode="tools", max_steps=1,
+                                  tier="perception", detector="oracle"),
+                eval=EvalConfig(episodes=1, log_dir=d, save_trajectories=False),
+                viz=VizConfig(enabled=False, backend="none"),
+            )
+            from harness.agent.llm_controller import LLMController
+            real_init = LLMController.__init__
+
+            def spy(self, llm, **kw):
+                seen.update(kw)
+                return real_init(self, llm, **kw)
+
+            with mock.patch.object(LLMController, "__init__", spy):
+                run_eval(cfg)
+
+        self.assertEqual(seen.get("tier"), "perception", "tier was dropped en route")
+        self.assertIsNotNone(seen.get("detector"), "no detector was built for the tier")
+
+    def test_a_privileged_config_needs_no_detector(self):
+        import tempfile
+        from unittest import mock
+
+        from harness.config import AgentConfig, EnvConfig, EvalConfig, HarnessConfig, LLMConfig, VizConfig
+        from harness.runner import run_eval
+
+        seen = {}
+        with tempfile.TemporaryDirectory() as d:
+            cfg = HarnessConfig(
+                llm=LLMConfig(provider="mock", model="mock-1"),
+                env=EnvConfig(name="tabletop", task="pick_place"),
+                agent=AgentConfig(name="llm_controller", mode="tools", max_steps=1),
+                eval=EvalConfig(episodes=1, log_dir=d, save_trajectories=False),
+                viz=VizConfig(enabled=False, backend="none"),
+            )
+            from harness.agent.llm_controller import LLMController
+            real_init = LLMController.__init__
+
+            def spy(self, llm, **kw):
+                seen.update(kw)
+                return real_init(self, llm, **kw)
+
+            with mock.patch.object(LLMController, "__init__", spy):
+                run_eval(cfg)
+
+        self.assertEqual(seen.get("tier"), "privileged")
+        self.assertIsNone(seen.get("detector"))

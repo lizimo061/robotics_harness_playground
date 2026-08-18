@@ -134,17 +134,35 @@ def run_eval(cfg: HarnessConfig) -> dict:
         # Only the LLM path can be fooled by a blind model; the baselines above
         # never look at a frame.
         _check_vision_config(cfg, llm)
+        # The scaffolding tier and its detector have to be forwarded explicitly.
+        # An earlier attempt to wire these went in as a string patch whose pattern
+        # never matched, so it silently changed nothing: `tier: perception` in a
+        # YAML reached AgentConfig, was validated, and was then dropped on the
+        # floor here, leaving the agent with the privileged toolset while the run
+        # was labelled as perception. Assert the plumbing instead of assuming it --
+        # tests/test_perception_tier.py covers the switch, and the runner-level
+        # test in tests/test_vision_gating.py covers this hand-off.
+        tier = str(cfg.agent.extra.get("tier", cfg.agent.tier) or "privileged")
+        detector = None
+        if tier != "privileged":
+            from harness.perception.detect import get_detector
+
+            detector = get_detector(cfg.agent.detector or "oracle", env)
+        extra = {k: v for k, v in cfg.agent.extra.items()
+                 if k not in ("tier", "detector")}
         agent = LLMController(
             llm,
             mode=cfg.agent.mode,
             max_steps=cfg.agent.max_steps,
             use_vision=cfg.agent.use_vision,
+            tier=tier,
+            detector=detector,
             system_prompt=cfg.agent.system_prompt,
             temperature=cfg.agent.temperature,
             task_description=cfg.env.task,
             recorder=recorder,
             on_step=viewer.on_step if viewer is not None else None,
-            **cfg.agent.extra,
+            **extra,
         )
         # One directory per (model, env) so two models under comparison cannot
         # append into the same file -- run_name=cfg.env.name collided by design.
