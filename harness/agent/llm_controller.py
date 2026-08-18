@@ -79,6 +79,11 @@ class LLMController:
         mode: str = "json",
         max_steps: int = 50,
         use_vision: bool = False,
+        #: Read a bounded monitor prompt each turn instead of replaying the whole
+        #: transcript, consulting the full history only at planning points. Off by
+        #: default so existing runs are byte-identical; see harness/agent/context.py.
+        two_clock: bool = False,
+        monitor_decisions: int = 4,
         system_prompt: str = "",
         temperature: Optional[float] = None,
         task_description: str = "",
@@ -94,6 +99,9 @@ class LLMController:
         self._max_steps = max_steps
         self._use_vision = use_vision
         self._warned_no_image = False
+        self._two_clock = bool(two_clock)
+        self._monitor_decisions = int(monitor_decisions)
+        self._transcript = None
         self._system_prompt_override = system_prompt
         self._temperature = temperature
         self._task_description = task_description
@@ -201,6 +209,13 @@ class LLMController:
                 skill_docs=get_skill_docs() if self._mode == "code" else "",
             )
         messages: list[ChatMessage] = [ChatMessage.system(system)]
+        if self._two_clock:
+            from harness.agent.context import DeliberationContext, MonitorContext, Transcript
+
+            self._transcript = Transcript(system=system)
+            self._monitor = MonitorContext(decisions=self._monitor_decisions,
+                                           include_image=self._use_vision)
+            self._deliberation = DeliberationContext()
 
         if self._mode == "plan":
             plan = self._complete(
@@ -284,6 +299,26 @@ class LLMController:
             self._recorder.finish(success=ep.success, total_reward=ep.total_reward)
         return ep
 
+    def _frame_for_vision(self, obs, frame):
+        if not self._use_vision:
+            return None
+        image = getattr(obs, "image", None)
+        return frame if image is None else image
+
+    def _is_planning_point(self) -> bool:
+        """First turn, a subgoal boundary, or after a recovery."""
+        t = self._transcript
+        if t is None or not t.turns:
+            return True
+        return bool(getattr(self, "_needs_deliberation", False))
+
+    def _feedback(self, messages, text: str) -> None:
+        """Record tool feedback in whichever store the run is using."""
+        if self._transcript is not None:
+            self._transcript.record_feedback(text)
+        else:
+            messages.append(ChatMessage.user("Tool result: " + text))
+
     def _observation_message(self, obs_text: str, obs, frame) -> ChatMessage:
         """The per-turn observation, with the camera frame attached when asked for.
 
@@ -311,16 +346,33 @@ class LLMController:
     def _tools_step(self, env, ep, messages, obs, obs_text, step, frame) -> None:
         from harness.tools import parse_tool_call
 
-        messages.append(self._observation_message(obs_text, obs, frame))
-        prompt = _serialize_messages(messages)
-        resp = self._complete(messages, temperature=self._temperature)
-        messages.append(ChatMessage.assistant(resp.content))
+        image = self._frame_for_vision(obs, frame)
+        if self._transcript is not None:
+            # Fast clock by default; the slow one only at planning points. A planning
+            # point is the first turn, a subgoal boundary, or a recovery -- anywhere a
+            # decision needs the whole history rather than the last few moves.
+            planning = self._is_planning_point()
+            self._transcript.begin_turn(obs_text, deliberated=planning)
+            view = self._deliberation if planning else self._monitor
+            turn_messages = view.messages(self._transcript, obs_text, image=image)
+        else:
+            messages.append(self._observation_message(obs_text, obs, frame))
+            turn_messages = messages
+        prompt = _serialize_messages(turn_messages)
+        resp = self._complete(turn_messages, temperature=self._temperature)
+        if self._transcript is None:
+            messages.append(ChatMessage.assistant(resp.content))
 
         name, args = parse_tool_call(resp.content)
+        if self._transcript is not None:
+            self._transcript.record_reply(
+                resp.content,
+                decision=f"{name}({', '.join(f'{k}={v}' for k, v in (args or {}).items())})"
+                if name else "unparsed")
 
         if name is None or name not in self._tool_registry:
             hint = "Invalid tool call. Available tools: " + ", ".join(t.name for t in self._tools)
-            messages.append(ChatMessage.user(hint))
+            self._feedback(messages, hint)
             self._emit(step=step, observation_text=obs_text, prompt_messages=prompt, llm_response=resp.content, action_dict={"tool": name, "args": args}, reward=None, success=None, info={}, frame=frame)
             return
 
@@ -340,7 +392,7 @@ class LLMController:
             result = tool.run(env, **args)
         except Exception as e:  # noqa: BLE001 - a bad tool call must not kill the episode
             log.warning("tool '%s' failed: %s", name, e)
-            messages.append(ChatMessage.user(f"Tool '{name}' failed: {e}. Check the arguments and try again."))
+            self._feedback(messages, f"Tool '{name}' failed: {e}. Check the arguments and try again.")
             self._emit(step=step, observation_text=obs_text, prompt_messages=prompt, llm_response=resp.content, action_dict={"tool": name, "args": args, "error": str(e)}, reward=None, success=None, info={}, frame=frame)
             return
 
@@ -352,12 +404,12 @@ class LLMController:
             ep.observations.append(r.obs)
             obs = r.obs
             self._emit(step=step, observation_text=obs_text, prompt_messages=prompt, llm_response=resp.content, action_dict={"tool": name, "args": args}, reward=r.reward, success=r.success, info=dict(r.info), frame=frame)
-            messages.append(ChatMessage.user("Tool result: " + result.feedback))
+            self._feedback(messages, result.feedback)
             return
 
         # pure perception / control tool (no env step)
         self._emit(step=step, observation_text=obs_text, prompt_messages=prompt, llm_response=resp.content, action_dict={"tool": name, "args": args}, reward=None, success=None, info={}, frame=frame)
-        messages.append(ChatMessage.user("Tool result: " + result.feedback))
+        self._feedback(messages, result.feedback)
 
     def _closed_loop_tool_step(self, env, ep, messages, tool, name, args, obs_text, prompt, resp, step, frame) -> None:
         """Run a tool that drives the env itself (e.g. run_policy) and record it.
@@ -377,7 +429,7 @@ class LLMController:
             result = tool.run(env, on_step=record, **args)
         except Exception as e:  # noqa: BLE001 - a bad tool call must not kill the episode
             log.warning("closed-loop tool '%s' failed: %s", name, e)
-            messages.append(ChatMessage.user(f"Tool '{name}' failed: {e}. Check the arguments and try again."))
+            self._feedback(messages, f"Tool '{name}' failed: {e}. Check the arguments and try again.")
             self._emit(step=step, observation_text=obs_text, prompt_messages=prompt, llm_response=resp.content, action_dict={"tool": name, "args": args, "error": str(e)}, reward=None, success=None, info={}, frame=frame)
             return
 
