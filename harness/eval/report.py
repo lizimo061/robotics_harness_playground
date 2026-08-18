@@ -48,7 +48,13 @@ _RAMP_DARK = ["#12233a", "#173556", "#1c4a7c", "#256abf", "#3987e5", "#6da7ec", 
 _RAMP_INK_LIGHT = ["#0b0b0b", "#0b0b0b", "#0b0b0b", "#0b0b0b", "#0b0b0b", "#ffffff", "#ffffff"]
 _RAMP_INK_DARK = ["#ffffff", "#ffffff", "#ffffff", "#ffffff", "#0b0b0b", "#0b0b0b", "#0b0b0b"]
 
-_BASELINE_IDS = ("oracle", "null")
+#: Rows that are references rather than competitors. "scripted" is a solvability
+#: probe that is told what to do, so it belongs here too -- ranking it against
+#: models would compare a model with something handed the answer.
+_BASELINE_IDS = ("oracle", "scripted", "scripted_pick_place", "null")
+
+#: Anything that establishes a task is solvable at all, in preference order.
+_SOLVABILITY_IDS = ("oracle", "scripted", "scripted_pick_place")
 
 
 def _e(v) -> str:
@@ -337,16 +343,19 @@ def render_report(
 
     # ---- audit callouts --------------------------------------------------
     audit = []
-    oracle = models.get("oracle")
+    ref_id = next((i for i in _SOLVABILITY_IDS if i in models), None)
+    oracle = models.get(ref_id) if ref_id else None
     null = models.get("null")
     if oracle is not None:
         broken = [t for t, v in (oracle.get("per_task") or {}).items()
                   if v.get("trials") and v["successes"] < v["trials"]]
         if broken:
             audit.append(
-                "The oracle does not solve " + ", ".join(f"<code>{_e(t)}</code>" for t in broken)
+                f"The solvability reference (<code>{_e(ref_id)}</code>) does not solve "
+                + ", ".join(f"<code>{_e(t)}</code>" for t in broken)
                 + ". Those tasks may be unsolvable as specified, and every agent's score on "
-                "them is uninterpretable until that is resolved.")
+                "them is uninterpretable until that is resolved -- a zero cannot be "
+                "attributed to the agent when the reference scores zero too.")
     if null is not None and null.get("success_rate", 0) > 0:
         vac = [t for t, v in (null.get("per_task") or {}).items() if v.get("successes")]
         audit.append(
@@ -363,8 +372,10 @@ def render_report(
             "reading the remaining columns as the whole grid.")
     if oracle is None or null is None:
         audit.append(
-            "This job has no " + ("oracle" if oracle is None else "null")
-            + " baseline, so task solvability and success-check validity are unverified.")
+            "This job has no " + ("solvability reference (oracle or scripted probe)"
+                                  if oracle is None else "null baseline")
+            + ", so " + ("task solvability" if oracle is None
+                         else "success-check validity") + " is unverified.")
     audit_html = "".join(
         f'<div class="callout"><span class="tag">&#9888; audit</span><p>{a}</p></div>'
         for a in audit

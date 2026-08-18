@@ -124,7 +124,8 @@ class TestAuditCallouts(unittest.TestCase):
                 + [_rec("stack", "oracle", s, False) for s in (0, 1)]
                 + [_rec(t, "null", s, False) for t in TASKS for s in (0, 1)])
         html = render_report(_summary(recs, ["oracle", "null_agent"]), recs)
-        self.assertIn("oracle does not solve", html)
+        self.assertIn("does not solve", html)
+        self.assertIn("<code>oracle</code>", html)
         self.assertIn("<code>stack</code>", html)
 
     def test_null_passing_is_called_out_as_vacuous(self):
@@ -138,7 +139,7 @@ class TestAuditCallouts(unittest.TestCase):
     def test_a_missing_baseline_is_called_out(self):
         recs = [_rec(t, "m", s, True) for t in TASKS for s in (0, 1)]
         html = render_report(_summary(recs, ["llm_controller"]), recs)
-        self.assertIn("no oracle", html)
+        self.assertIn("no solvability reference", html)
 
     def test_a_clean_job_raises_no_audit_callout(self):
         recs = ([_rec(t, "oracle", s, True) for t in TASKS for s in (0, 1)]

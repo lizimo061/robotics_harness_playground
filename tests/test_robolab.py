@@ -275,8 +275,17 @@ class TestToolCentrePoint(unittest.TestCase):
         return env
 
     def _env_down(self, **kw):
-        """Wrist hanging straight down: local +z resolves to world -z."""
-        return self._env(quat=(0.0, 1.0, 0.0, 0.0), **kw)
+        """Wrist hanging straight down, expressed in eef-frame terms.
+
+        _current_quat() reports the eef frame, so the fixture's base_link
+        quaternion is chosen such that the eef frame comes out as (0,1,0,0).
+        """
+        import numpy as np
+
+        import harness.envs.robolab as r
+        base = r._quat_mul(np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32),
+                           r._quat_inv(r._EEF_OFFSET_ROT))
+        return self._env(quat=tuple(float(x) for x in base), **kw)
 
     def test_a_grasp_target_is_raised_to_the_flange(self):
         import numpy as np
@@ -297,7 +306,11 @@ class TestToolCentrePoint(unittest.TestCase):
         import numpy as np
 
         from harness.types import Action
-        env = self._env(ee=(0.30, 0.0, 0.40), quat=(0.7071, 0.0, 0.7071, 0.0))
+        # eef frame rotated 90 degrees about y: the fingertips lie along +x
+        import harness.envs.robolab as r
+        base = r._quat_mul(np.array([0.7071, 0.0, 0.7071, 0.0], dtype=np.float32),
+                           r._quat_inv(r._EEF_OFFSET_ROT))
+        env = self._env(ee=(0.30, 0.0, 0.40), quat=tuple(float(x) for x in base))
         out = np.asarray(env._to_env_action(
             Action(kind="ee_pose", value=[0.43, 0.0, 0.20]))).ravel()
         self.assertAlmostEqual(float(out[0]), 0.43 - 0.1628, places=3)
@@ -352,13 +365,17 @@ class TestOrientationControl(unittest.TestCase):
     def test_a_seven_vector_commands_the_orientation(self):
         import numpy as np
 
+        import harness.envs.robolab as r
         from harness.types import Action
         env = self._env()
         want = [0.0, 1.0, 0.0, 0.0]
         out = np.asarray(env._to_env_action(
             Action(kind="ee_pose", value=[0.4, 0.0, 0.2] + want))).ravel()
-        for got, exp in zip(out[3:7], want):
-            self.assertAlmostEqual(float(got), exp, places=5)
+        # sent in base_link terms, i.e. un-offset from the eef frame
+        expected = r._quat_mul(np.asarray(want, dtype=np.float32),
+                               r._quat_inv(r._EEF_OFFSET_ROT))
+        for got, exp in zip(out[3:7], expected):
+            self.assertAlmostEqual(float(got), float(exp), places=5)
 
     def test_the_setpoint_is_held_not_read_back_from_the_measurement(self):
         import numpy as np
@@ -373,8 +390,11 @@ class TestOrientationControl(unittest.TestCase):
         out = np.asarray(env._to_env_action(
             Action(kind="ee_pose", value=[0.4, 0.0, 0.2]))).ravel()
         # ...and the command still asks for the orientation we set
-        self.assertAlmostEqual(float(out[3]), 0.0, places=5)
-        self.assertAlmostEqual(float(out[4]), 1.0, places=5)
+        import harness.envs.robolab as r
+        expected = r._quat_mul(np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32),
+                               r._quat_inv(r._EEF_OFFSET_ROT))
+        for got, exp in zip(out[3:7], expected):
+            self.assertAlmostEqual(float(got), float(exp), places=5)
 
     def test_the_setpoint_seeds_from_the_pose_when_never_commanded(self):
         import numpy as np
@@ -383,7 +403,9 @@ class TestOrientationControl(unittest.TestCase):
         env = self._env(quat=(0.7071, 0.0, 0.7071, 0.0))
         out = np.asarray(env._to_env_action(
             Action(kind="ee_pose", value=[0.4, 0.0, 0.2]))).ravel()
-        self.assertAlmostEqual(float(out[3]), 0.7071, places=3)
+        # seeded from the measured pose, so it must send that pose back unchanged
+        for got, exp in zip(out[3:7], (0.7071, 0.0, 0.7071, 0.0)):
+            self.assertAlmostEqual(float(got), float(exp), places=3)
 
     def test_a_non_unit_quaternion_is_ignored_rather_than_sent(self):
         import numpy as np
@@ -445,3 +467,63 @@ class TestCameraChoice(unittest.TestCase):
         obs = {"proprio": np.zeros((7,), dtype=np.float32),
                "over_shoulder_left_camera": np.full((40, 40, 3), 9, dtype=np.uint8)}
         self.assertEqual(int(self._pick(obs)[0, 0, 0]), 9)
+
+
+class TestEndEffectorFrameConversion(unittest.TestCase):
+    """RoboLab's IK tracks base_link, but poses are expressed in the eef frame.
+
+    The two frames share an origin and differ by a fixed rotation
+    (EEF_OFFSET_ROT), so a target must be un-offset before it is sent:
+    action_quat = target_eef_quat (x) R_offset^-1, exactly as RoboLab's own
+    run_abs_ik_demo.py does. Skipping the conversion fails silently -- it points
+    the gripper somewhere else, which is why a commanded top-down grasp closed
+    beside the object at every approach depth tried.
+    """
+
+    def test_the_conversion_round_trips(self):
+        import numpy as np
+
+        import harness.envs.robolab as r
+        base = np.array([0.7071, 0.0, 0.7071, 0.0], dtype=np.float32)
+        eef = r._quat_mul(base, r._EEF_OFFSET_ROT)
+        back = r._quat_mul(eef, r._quat_inv(r._EEF_OFFSET_ROT))
+        self.assertTrue(np.allclose(base, back, atol=1e-5))
+
+    def test_a_commanded_orientation_is_un_offset_before_sending(self):
+        import numpy as np
+
+        import harness.envs.robolab as r
+        from harness.types import Action
+        env = _env_for_action_tests(mode="ee_pose", space=_FakeAbsSpace())
+        want_eef = np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32)
+        out = np.asarray(env._to_env_action(
+            Action(kind="ee_pose",
+                   value=np.concatenate([[0.4, 0.0, 0.2], want_eef])))).ravel()
+        expected = r._quat_mul(want_eef, r._quat_inv(r._EEF_OFFSET_ROT))
+        for got, exp in zip(out[3:7], expected):
+            self.assertAlmostEqual(float(got), float(exp), places=5)
+
+    def test_a_pose_read_back_can_be_commanded_unchanged(self):
+        """Both directions must use the same frame or aiming is impossible."""
+        import numpy as np
+
+        import harness.envs.robolab as r
+        from harness.types import Action
+        env = _env_for_action_tests(mode="ee_pose", space=_FakeAbsSpace(),
+                                    quat=(0.7071, 0.0, 0.7071, 0.0))
+        here = env._current_quat()                     # eef-frame terms
+        out = np.asarray(env._to_env_action(
+            Action(kind="ee_pose",
+                   value=np.concatenate([[0.4, 0.0, 0.2], here])))).ravel()
+        # what we send must be the base_link orientation the arm already has
+        for got, exp in zip(out[3:7], [0.7071, 0.0, 0.7071, 0.0]):
+            self.assertAlmostEqual(float(got), float(exp), places=4)
+
+    def test_the_sent_quaternion_stays_unit_length(self):
+        import numpy as np
+
+        from harness.types import Action
+        env = _env_for_action_tests(mode="ee_pose", space=_FakeAbsSpace())
+        out = np.asarray(env._to_env_action(
+            Action(kind="ee_pose", value=[0.4, 0.0, 0.2, 0.0, 1.0, 0.0, 0.0]))).ravel()
+        self.assertAlmostEqual(float(np.linalg.norm(out[3:7])), 1.0, places=5)

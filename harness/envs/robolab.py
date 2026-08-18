@@ -34,6 +34,36 @@ def _fmt_vec(v) -> str:
     return "(" + ", ".join(f"{float(x):.3f}" for x in a) + ")"
 
 
+#: Orientation of RoboLab's end-effector control frame relative to the body the IK
+#: actually tracks (``base_link``). RoboLab keeps this constant in
+#: robolab.robots.droid as EEF_OFFSET_ROT, with EEF_OFFSET_POS = (0,0,0) -- so the
+#: two frames share an origin but not an orientation, and a target expressed in
+#: end-effector coordinates must be un-offset before it is sent:
+#:     action_quat = target_eef_quat (x) R_offset^-1
+#: RoboLab's own examples/run_abs_ik_demo.py does exactly this. Skipping it does
+#: not fail loudly; it silently points the gripper somewhere else, which is why a
+#: commanded top-down grasp closed beside the object at every approach depth.
+_EEF_OFFSET_ROT = np.array([0.5, -0.5, 0.5, -0.5], dtype=np.float32)
+
+
+def _quat_mul(a, b) -> np.ndarray:
+    """Hamilton product, both in (w, x, y, z)."""
+    w1, x1, y1, z1 = np.asarray(a, dtype=np.float32).ravel()[:4]
+    w2, x2, y2, z2 = np.asarray(b, dtype=np.float32).ravel()[:4]
+    return np.array([
+        w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+        w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+        w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+        w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+    ], dtype=np.float32)
+
+
+def _quat_inv(q) -> np.ndarray:
+    """Inverse of a unit quaternion (its conjugate)."""
+    w, x, y, z = np.asarray(q, dtype=np.float32).ravel()[:4]
+    return np.array([w, -x, -y, -z], dtype=np.float32)
+
+
 def _rotate_by_quat(vec, quat) -> np.ndarray:
     """Rotate `vec` by the (w, x, y, z) quaternion `quat`.
 
@@ -461,7 +491,11 @@ class RoboLabEnv(Env):
             return np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)  # identity
         arr = arr[:4]
         norm = float(np.linalg.norm(arr))
-        return arr / norm if norm > 1e-6 else np.array([1.0, 0.0, 0.0, 0.0], np.float32)
+        if norm <= 1e-6:
+            return np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        # proprio reports base_link; express it in end-effector terms so a pose we
+        # read back can be commanded again unchanged
+        return _quat_mul(arr / norm, _EEF_OFFSET_ROT)
 
     def _pack_action(self, action: Action, dim: int) -> np.ndarray:
         """Lay the requested motion out the way this action flavour expects.
@@ -502,7 +536,10 @@ class RoboLabEnv(Env):
             # gripper's own offset in whatever direction the wrist is pointing
             flange = target.copy()
             flange[:3] = flange[:3] - self._tcp_vector()
-            out = np.concatenate([flange, self._target_quat()])
+            # un-offset the orientation: the IK tracks base_link, our setpoint is
+            # expressed in end-effector terms (see _EEF_OFFSET_ROT)
+            send_quat = _quat_mul(self._target_quat(), _quat_inv(_EEF_OFFSET_ROT))
+            out = np.concatenate([flange, send_quat])
         elif self._action_mode == "ee_delta":
             delta = np.zeros(3, dtype=np.float32)
             if absolute and v.size >= 2:
