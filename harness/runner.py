@@ -58,22 +58,32 @@ def run_eval(cfg: HarnessConfig) -> dict:
     ) if viz_enabled else None
     viewer = _make_live_viewer(cfg.viz) if viz_enabled else None
 
-    agent = LLMController(
-        llm,
-        mode=cfg.agent.mode,
-        max_steps=cfg.agent.max_steps,
-        use_vision=cfg.agent.use_vision,
-        system_prompt=cfg.agent.system_prompt,
-        temperature=cfg.agent.temperature,
-        task_description=cfg.env.task,
-        recorder=recorder,
-        on_step=viewer.on_step if viewer is not None else None,
-        **cfg.agent.extra,
-    )
+    # Reference baselines bypass the LLM entirely: the oracle proves a task is
+    # solvable (and supplies the efficiency denominator), the null agent proves
+    # the success check is not vacuous.
+    baseline = cfg.agent.name.strip().lower()
+    if baseline in ("oracle", "oracle_agent", "null", "null_agent", "nop", "noop"):
+        from harness.agent.baselines import get_baseline_agent
 
-    # One directory per (model, env) so two models under comparison cannot
-    # append into the same file -- run_name=cfg.env.name collided by design.
-    model_id = (cfg.llm.model or cfg.llm.provider or "model").replace("/", "_")
+        agent = get_baseline_agent(baseline, max_steps=cfg.agent.max_steps, **cfg.agent.extra)
+        model_id = "oracle" if baseline.startswith("oracle") else "null"
+    else:
+        agent = LLMController(
+            llm,
+            mode=cfg.agent.mode,
+            max_steps=cfg.agent.max_steps,
+            use_vision=cfg.agent.use_vision,
+            system_prompt=cfg.agent.system_prompt,
+            temperature=cfg.agent.temperature,
+            task_description=cfg.env.task,
+            recorder=recorder,
+            on_step=viewer.on_step if viewer is not None else None,
+            **cfg.agent.extra,
+        )
+        # One directory per (model, env) so two models under comparison cannot
+        # append into the same file -- run_name=cfg.env.name collided by design.
+        model_id = (cfg.llm.model or cfg.llm.provider or "model").replace("/", "_")
+
     run_name = f"{cfg.env.name.replace(':', '_')}__{model_id}"
     logger = TrajectoryLogger(log_dir=cfg.eval.log_dir, run_name=run_name)
     writer = ResultsWriter(Path(cfg.eval.log_dir) / run_name)

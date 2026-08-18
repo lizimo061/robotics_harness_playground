@@ -79,10 +79,31 @@ def summarize(episodes: list[Episode]) -> dict:
     return out
 
 
+def oracle_steps_by_task(records: Sequence[dict]) -> dict:
+    """Median oracle step count per task, for use as an efficiency reference.
+
+    Manipulation has no geodesic optimum, so SPL's shortest-path denominator
+    does not exist. A scripted oracle is the closest available stand-in -- the
+    same substitution BEHAVIOR-1K makes when it normalises efficiency against
+    human demonstrations.
+    """
+    per_task: dict[str, list[int]] = defaultdict(list)
+    for r in records:
+        if str(r.get("policy") or "").startswith("oracle") and r.get("success"):
+            per_task[str(r.get("env_name") or "?")].append(int(r.get("episode_step") or 0))
+    out = {}
+    for task, steps in per_task.items():
+        steps = sorted(s for s in steps if s > 0)
+        if steps:
+            out[task] = steps[len(steps) // 2]
+    return out
+
+
 def summarize_records(
     records: Sequence[dict],
     *,
     reliability_k: Iterable[int] = (2, 5, 10),
+    oracle_steps: Optional[dict] = None,
 ) -> dict:
     """Summarise a flat per-episode log, grouped by model then task.
 
@@ -162,6 +183,29 @@ def summarize_records(
         if not_model:
             entry["not_model_fault"] = not_model
             entry["not_model_fault_pct"] = round(100 * not_model / n, 1)
+
+        # Efficiency, reported beside success and never folded into it: one
+        # SPL number cannot distinguish "half the episodes failed" from "all
+        # succeeded at twice the optimal path".
+        if oracle_steps:
+            ratios, spl = [], []
+            for r in rows:
+                task = str(r.get("env_name") or "?")
+                ref = oracle_steps.get(task)
+                took = int(r.get("episode_step") or 0)
+                if not ref:
+                    continue
+                if r.get("success") and took > 0:
+                    ratios.append(took / ref)
+                # SoftSPL-style: graded score weighted by step efficiency
+                grade = 1.0 if r.get("success") else (
+                    float(r["score"]) if r.get("score") is not None else 0.0
+                )
+                spl.append(grade * (ref / max(took, ref)) if took else 0.0)
+            if ratios:
+                entry["steps_vs_oracle"] = round(sum(ratios) / len(ratios), 3)
+            if spl:
+                entry["soft_spl"] = round(sum(spl) / len(spl), 4)
 
         entry["per_task"] = {
             t: {

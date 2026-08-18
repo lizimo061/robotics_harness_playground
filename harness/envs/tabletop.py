@@ -64,6 +64,8 @@ class TabletopEnv(Env):
                 self._targets[name] = o["target"]
             if o.get("role"):
                 self._roles[name] = o["role"]
+        #: pristine copy of the initial layout, restored on every reset()
+        self._objects_home = {k: v.copy() for k, v in self._objects.items()}
         self._goals: dict[str, np.ndarray] = {k: np.asarray(v, dtype=float) for k, v in self.task_spec.goals.items()}
         self._obstacles: list[dict] = [dict(o) for o in self.task_spec.obstacles]
 
@@ -105,6 +107,12 @@ class TabletopEnv(Env):
     def reset(self, *, seed: Optional[int] = None) -> Obs:
         if seed is not None:
             self._rng = np.random.default_rng(seed)
+        # Restore object poses, not just the arm. step() carries a grasped
+        # object by writing self._objects[name], so without this an episode
+        # inherits the previous one's layout: once a task is solved the object
+        # stays at its goal and every later episode starts already successful.
+        # That silently inflates any multi-episode success rate.
+        self._objects = {k: v.copy() for k, v in self._objects_home.items()}
         self._ee = self._ee_home.copy()
         self._gripper = 0.0
         self._grasped = None

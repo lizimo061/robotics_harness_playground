@@ -349,3 +349,78 @@ class TestReportingRule(unittest.TestCase):
             self.assertEqual(len(data), 2)
             entry = next(iter(data.values()))
             self.assertEqual(sorted(entry), ["api_calls", "cost", "resolved"])
+
+
+class TestBaselines(unittest.TestCase):
+    """Reference agents, and the env bug they exposed."""
+
+    def _env(self, task, seed=0):
+        return TabletopEnv(task_spec=generate_task(task, seed=seed))
+
+    def test_oracle_solves_every_2d_task(self):
+        from harness.agent.baselines import OracleAgent
+        from harness.tasks.base import _TASK_GENERATORS_2D as REG
+
+        for task in sorted(REG):
+            if task == "cook_bread":
+                continue  # kitchen task, needs KitchenEnv
+            ep = OracleAgent(max_steps=300).run(self._env(task), seed=0)
+            self.assertTrue(ep.success, f"oracle failed {task} -- task may be unsolvable")
+
+    def test_null_agent_solves_nothing(self):
+        from harness.agent.baselines import NullAgent
+        from harness.tasks.base import _TASK_GENERATORS_2D as REG
+
+        for task in sorted(REG):
+            if task == "cook_bread":
+                continue
+            ep = NullAgent().run(self._env(task), seed=0)
+            self.assertFalse(ep.success, f"{task} passes with no actions -- vacuous success check")
+
+    def test_episodes_are_independent(self):
+        """reset() must restore object poses, not just the arm.
+
+        step() carries a grasped object by writing self._objects[name]. Without
+        restoring them, a solved task stays solved and every later episode
+        starts already successful -- silently inflating any multi-episode rate.
+        """
+        from harness.agent.baselines import OracleAgent
+
+        env = self._env("pick_place")
+        steps = [OracleAgent(max_steps=300).run(env, seed=s).steps for s in range(4)]
+        self.assertTrue(all(s > 3 for s in steps), f"layout leaked between episodes: {steps}")
+        self.assertEqual(len(set(steps)), 1, f"same seed should be deterministic: {steps}")
+
+    def test_null_does_not_inherit_a_solved_layout(self):
+        from harness.agent.baselines import NullAgent, OracleAgent
+
+        env = self._env("pick_place")
+        self.assertTrue(OracleAgent(max_steps=300).run(env, seed=0).success)
+        self.assertFalse(NullAgent().run(env, seed=1).success)
+
+    def test_oracle_supplies_an_efficiency_denominator(self):
+        from harness.eval.metrics import oracle_steps_by_task
+
+        rows = [{"policy": "oracle", "env_name": "t", "success": True, "episode_step": 15},
+                {"policy": "oracle", "env_name": "t", "success": True, "episode_step": 17},
+                {"policy": "oracle", "env_name": "t", "success": False, "episode_step": 3}]
+        self.assertEqual(oracle_steps_by_task(rows)["t"], 17)  # median of successes only
+
+    def test_soft_spl_rewards_efficiency_not_just_success(self):
+        rows = [{"policy": "fast", "env_name": "t", "success": True, "episode_step": 10},
+                {"policy": "slow", "env_name": "t", "success": True, "episode_step": 40}]
+        out = summarize_records(rows, oracle_steps={"t": 10})
+        self.assertGreater(out["models"]["fast"]["soft_spl"], out["models"]["slow"]["soft_spl"])
+        self.assertAlmostEqual(out["models"]["fast"]["steps_vs_oracle"], 1.0, places=3)
+
+    def test_baselines_run_through_the_runner(self):
+        with tempfile.TemporaryDirectory() as d:
+            for name, expect in (("oracle", True), ("null_agent", False)):
+                s = run_eval(HarnessConfig.from_dict({
+                    "seed": 0, "llm": {"provider": "mock"},
+                    "env": {"name": "tabletop", "task": "pick_place"},
+                    "agent": {"name": name, "max_steps": 300},
+                    "eval": {"episodes": 2, "log_dir": d, "verbose": False},
+                    "viz": {"enabled": False, "backend": "none"},
+                }))
+                self.assertEqual(s["success_rate"] == 1.0, expect, name)
