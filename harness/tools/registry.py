@@ -73,10 +73,21 @@ def get_policy_tools(policy, **policy_kwargs) -> list[Tool]:
     vector, and mixing the two invites the LLM to fight the policy for control.
     What is left: delegate motion, perceive, declare done.
     """
-    from harness.tools.policy_tool import RunPolicyTool
+    from harness.tools.policy_tool import (
+        AbortPolicyTool,
+        ContinuePolicyTool,
+        RunPolicyTool,
+    )
+
+    runner = RunPolicyTool(policy, **policy_kwargs)
+    # continue/abort are only meaningful when the rollout can pause; offering them
+    # without a monitor cadence would advertise a choice the agent cannot make.
+    interruptible = [ContinuePolicyTool(runner), AbortPolicyTool(runner)] \
+        if getattr(runner, "_monitor_every", 0) else []
 
     return [
-        RunPolicyTool(policy, **policy_kwargs),
+        runner,
+        *interruptible,
         GetEEPoseTool(),
         GetObjectPosTool(),
         ListObjectsTool(),
