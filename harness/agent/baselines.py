@@ -267,15 +267,21 @@ class ScriptedPickPlaceAgent(Agent):
 
     name = "scripted_pick_place"
 
-    def __init__(self, *, source: str = "", target: str = "", max_steps: int = 120,
-                 hover: float = 0.12, tol: float = 0.02, settle: int = 3,
-                 phase_budget: int = 14, top_down: bool = True, **kwargs) -> None:
+    def __init__(self, *, source: str = "", target: str = "", max_steps: int = 260,
+                 hover: float = 0.12, tol: float = 0.02, settle: int = 6,
+                 phase_budget: int = 32, top_down: bool = True, **kwargs) -> None:
         self._source = source
         self._target = target
         self._max_steps = int(max_steps)
         self._hover = float(hover)       # approach height above an object
         self._tol = float(tol)           # position tolerance before advancing
         self._settle = int(settle)       # steps to hold after a gripper change
+        #: Steps allowed per waypoint. This must be generous enough for the arm to
+        #: actually ARRIVE: a controller that clips each step to a few centimetres
+        #: needs tens of steps to cross a 12cm approach, and a phase that times out
+        #: early closes the gripper while the arm is still descending. Diagnostic
+        #: for that failure: total steps equal to waypoints x (budget + settle)
+        #: exactly, meaning no phase ever reached its tolerance.
         self._phase_budget = int(phase_budget)
         #: Command a downward approach where the env offers one. A wrist left in
         #: its start orientation cannot close on an object lying on a table, so

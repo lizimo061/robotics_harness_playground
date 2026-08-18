@@ -87,7 +87,7 @@ def _run_episode(env, raw, task, agent_id, agent_writer, i, kind, *,
     err = None
     if kind == "scripted" and move:
         agent = get_baseline_agent("scripted_pick_place", source=move[0],
-                                   target=move[1], max_steps=140)
+                                   target=move[1], max_steps=260)
     elif kind == "null" or args_cli.scripted:
         agent = get_baseline_agent("null", max_steps=args_cli.max_steps)
     else:
