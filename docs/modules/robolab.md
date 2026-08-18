@@ -13,6 +13,16 @@
     python examples/run_robolab.py --task PickCubeTask --headless              # real LLM
     python examples/run_robolab.py --task PickCubeTask --scripted --headless  # offline
 
+Hierarchical (recommended for real tasks): the LLM plans, a trained VLA executes.
+An LLM emitting raw action vectors cannot do fine manipulation; delegating motion
+to a policy via the run_policy tool is what makes RoboLab tasks tractable.
+
+    python examples/serve_robolab.py --port 8000                 # policy server
+    python examples/run_robolab.py --task BananaInBowlTask --headless \
+        --policy-url http://localhost:8000 --policy-steps 60
+
+See modules/policies.md and configs/robolab_policy_tool.yaml.
+
 Run inside the RoboLab venv. The Isaac Sim AppLauncher must be created before
 importing robolab/isaaclab (the example does this). The generic
 python -m harness.cli path does NOT set up AppLauncher, so it is not usable for
@@ -47,4 +57,5 @@ For the benchmark/leaderboard, run the harness as a standalone policy server:
 See modules/policy.md for the protocol and client hooks.
 
 ## Related
-- modules/envs.md, modules/policy.md, guides/add-environment.md, examples/run_robolab.py.
+- modules/envs.md, modules/policy.md, modules/policies.md (policy-as-tool),
+  guides/add-environment.md, examples/run_robolab.py.

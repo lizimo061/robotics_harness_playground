@@ -84,6 +84,8 @@ class LLMController:
         recorder: Optional[TraceRecorder] = None,
         on_step: Optional[Callable[[TraceStep], None]] = None,
         tools: Optional[list] = None,
+        policy=None,
+        policy_options: Optional[dict] = None,
         **kwargs,
     ) -> None:
         self._llm = llm
@@ -97,13 +99,26 @@ class LLMController:
         self._on_step = on_step
         self._capture_frames = (recorder is not None and recorder.capture_frames) or on_step is not None
 
+        self._policy = None
+        if policy is not None:
+            from harness.policies import get_policy
+
+            self._policy = get_policy(policy, llm=llm)
+
         self._tools = None
         self._tool_registry = None
         self._tools_full = None
         if mode == "tools":
-            from harness.tools import ToolRegistry, get_default_tools
+            from harness.tools import ToolRegistry, get_default_tools, get_policy_tools
 
-            self._tools_full = list(tools) if tools else get_default_tools()
+            if tools:
+                self._tools_full = list(tools)
+            elif self._policy is not None:
+                # policy-as-tool: the policy owns motion, the LLM plans/verifies
+                opts = {"use_vision": use_vision, **(policy_options or {})}
+                self._tools_full = get_policy_tools(self._policy, **opts)
+            else:
+                self._tools_full = get_default_tools()
             self._tools = self._tools_full
             self._tool_registry = ToolRegistry(self._tools)
 
@@ -163,6 +178,8 @@ class LLMController:
 
             if self._mode == "tools":
                 self._tools_step(env, ep, messages, obs, obs_text, step, frame)
+                if ep.observations:
+                    obs = ep.observations[-1]  # tools may have stepped the env
                 if ep.infos and ep.infos[-1].get("success", False):
                     break
                 if ep.actions and ep.actions[-1].kind == "stop":
@@ -248,7 +265,19 @@ class LLMController:
             return
 
         tool = self._tool_registry.get(name)
-        result = tool.run(env, **args)
+        args = {k: v for k, v in (args or {}).items() if k != "on_step"}
+
+        if getattr(tool, "closed_loop", False):
+            self._closed_loop_tool_step(env, ep, messages, tool, name, args, obs_text, prompt, resp, step, frame)
+            return
+
+        try:
+            result = tool.run(env, **args)
+        except Exception as e:  # noqa: BLE001 - a bad tool call must not kill the episode
+            log.warning("tool '%s' failed: %s", name, e)
+            messages.append(ChatMessage.user(f"Tool '{name}' failed: {e}. Check the arguments and try again."))
+            self._emit(step=step, observation_text=obs_text, prompt_messages=prompt, llm_response=resp.content, action_dict={"tool": name, "args": args, "error": str(e)}, reward=None, success=None, info={}, frame=frame)
+            return
 
         if result.action is not None:
             r = env.step(result.action)
@@ -264,6 +293,40 @@ class LLMController:
         # pure perception / control tool (no env step)
         self._emit(step=step, observation_text=obs_text, prompt_messages=prompt, llm_response=resp.content, action_dict={"tool": name, "args": args}, reward=None, success=None, info={}, frame=frame)
         messages.append(ChatMessage.user("Tool result: " + result.feedback))
+
+    def _closed_loop_tool_step(self, env, ep, messages, tool, name, args, obs_text, prompt, resp, step, frame) -> None:
+        """Run a tool that drives the env itself (e.g. run_policy) and record it.
+
+        The tool consumes many env steps per call, so its inner steps are folded
+        into the Episode via on_step; the trace gets one entry for the tool call.
+        """
+        before = len(ep.actions)
+
+        def record(action: Action, result) -> None:
+            ep.actions.append(action)
+            ep.rewards.append(result.reward)
+            ep.infos.append(result.info)
+            ep.observations.append(result.obs)
+
+        try:
+            result = tool.run(env, on_step=record, **args)
+        except Exception as e:  # noqa: BLE001 - a bad tool call must not kill the episode
+            log.warning("closed-loop tool '%s' failed: %s", name, e)
+            messages.append(ChatMessage.user(f"Tool '{name}' failed: {e}. Check the arguments and try again."))
+            self._emit(step=step, observation_text=obs_text, prompt_messages=prompt, llm_response=resp.content, action_dict={"tool": name, "args": args, "error": str(e)}, reward=None, success=None, info={}, frame=frame)
+            return
+
+        inner = ep.actions[before:]
+        reward = sum(ep.rewards[before:]) if inner else None
+        self._emit(
+            step=step, observation_text=obs_text, prompt_messages=prompt, llm_response=resp.content,
+            action_dict={"tool": name, "args": args, "steps": result.steps},
+            reward=reward, success=result.success,
+            info=dict(ep.infos[-1]) if ep.infos else {}, frame=frame,
+        )
+        messages.append(ChatMessage.user("Tool result: " + result.feedback))
+        if result.done:
+            ep.actions.append(Action(kind="stop", comment=f"{name} declared done"))
 
     # -- skills mode (plan -> execute with subgoal verification) -------- #
     def _run_skills_mode(self, env, ep) -> None:
