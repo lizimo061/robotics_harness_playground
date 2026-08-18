@@ -27,6 +27,7 @@ from harness.agent.prompts import (
 from harness.agent.skills import SkillContext, get_skill_docs
 from harness.envs.base import Env
 from harness.llm.base import ChatMessage, LLMClient
+from harness.llm.capabilities import TokenUsage, estimate_cost
 from harness.types import Action, Episode
 from harness.utils.logging import get_logger
 from harness.viz.recorder import TraceRecorder, TraceStep, action_to_dict
@@ -99,6 +100,12 @@ class LLMController:
         self._on_step = on_step
         self._capture_frames = (recorder is not None and recorder.capture_frames) or on_step is not None
 
+        # token / cost accounting, reset per episode in run()
+        self._usage = TokenUsage()
+        self._cost_usd = 0.0
+        self._cost_known = True
+        self._llm_calls = 0
+
         self._policy = None
         if policy is not None:
             from harness.policies import get_policy
@@ -122,8 +129,37 @@ class LLMController:
             self._tools = self._tools_full
             self._tool_registry = ToolRegistry(self._tools)
 
+    # -- llm accounting -------------------------------------------------- #
+    def _complete(self, messages, **kw):
+        """Call the LLM, recording tokens and cost.
+
+        Every provider already returns usage; nothing was reading it. Cost is
+        left unknown (rather than zero) when the model has no verified price,
+        so a blank cell never masquerades as "free".
+        """
+        resp = self._llm.complete(messages, **kw)
+        self._llm_calls += 1
+        usage = TokenUsage.from_raw(resp.usage)
+        self._usage = self._usage + usage
+        cost = estimate_cost(resp.model, usage)
+        if cost is None:
+            self._cost_known = False
+        else:
+            self._cost_usd += cost
+        return resp
+
+    def _record_usage(self, ep: Episode) -> None:
+        ep.metadata["llm_calls"] = self._llm_calls
+        ep.metadata["usage"] = self._usage.to_dict()
+        ep.metadata["cost_usd"] = round(self._cost_usd, 6) if self._cost_known else None
+
     # -- main loop ------------------------------------------------------- #
     def run(self, env: Env, *, seed: Optional[int] = None) -> Episode:
+        self._usage = TokenUsage()
+        self._cost_usd = 0.0
+        self._cost_known = True
+        self._llm_calls = 0
+
         ep = Episode(metadata={"mode": self._mode, "llm": self._llm.name, "env": env.name})
         obs = env.reset(seed=seed)
         ep.observations.append(obs)
@@ -133,6 +169,7 @@ class LLMController:
             ep.success = env.is_success() or bool(ep.infos and ep.infos[-1].get("success", False))
             ep.total_reward = sum(ep.rewards)
             ep.metadata["steps"] = ep.steps
+            self._record_usage(ep)
             if self._recorder is not None:
                 self._recorder.finish(success=ep.success, total_reward=ep.total_reward)
             return ep
@@ -156,7 +193,7 @@ class LLMController:
         messages: list[ChatMessage] = [ChatMessage.system(system)]
 
         if self._mode == "plan":
-            plan = self._llm.complete(
+            plan = self._complete(
                 [
                     ChatMessage.system(system),
                     ChatMessage.user("Write a short step-by-step plan to accomplish the task. Be concise."),
@@ -196,7 +233,7 @@ class LLMController:
                 messages.append(ChatMessage.user(user_text))
 
             prompt = _serialize_messages(messages)
-            resp = self._llm.complete(messages, temperature=self._temperature)
+            resp = self._complete(messages, temperature=self._temperature)
             messages.append(ChatMessage.assistant(resp.content))
 
             if self._mode == "code":
@@ -238,6 +275,7 @@ class LLMController:
         ep.success = bool(ep.infos and ep.infos[-1].get("success", False))
         ep.total_reward = sum(ep.rewards)
         ep.metadata["steps"] = ep.steps
+        self._record_usage(ep)
         if self._recorder is not None:
             self._recorder.finish(success=ep.success, total_reward=ep.total_reward)
         return ep
@@ -248,7 +286,7 @@ class LLMController:
 
         messages.append(ChatMessage.user(obs_text))
         prompt = _serialize_messages(messages)
-        resp = self._llm.complete(messages, temperature=self._temperature)
+        resp = self._complete(messages, temperature=self._temperature)
         messages.append(ChatMessage.assistant(resp.content))
 
         name, args = parse_tool_call(resp.content)
@@ -346,7 +384,7 @@ class LLMController:
 
         # 1. understand -> plan
         msgs = build_plan_prompt(task=task_desc, scene=scene, catalog=skill_catalog())
-        plan_resp = self._llm.complete(msgs, temperature=self._temperature)
+        plan_resp = self._complete(msgs, temperature=self._temperature)
         plan = parse_plan(plan_resp.content)
 
         # fall back to the task spec's gold plan if the LLM plan is unusable

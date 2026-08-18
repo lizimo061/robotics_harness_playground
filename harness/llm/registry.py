@@ -9,7 +9,12 @@ _PROVIDER_DEFAULTS: dict[str, tuple[str, str, str]] = {
     "deepseek": ("https://api.deepseek.com", "deepseek-chat", "DEEPSEEK_API_KEY"),
     "kimi": ("https://api.moonshot.cn/v1", "moonshot-v1-8k", "MOONSHOT_API_KEY"),
     "moonshot": ("https://api.moonshot.cn/v1", "moonshot-v1-8k", "MOONSHOT_API_KEY"),
-    "openai": ("https://api.openai.com/v1", "gpt-4o-mini", "OPENAI_API_KEY"),
+    "openai": ("https://api.openai.com/v1", "gpt-5.5", "OPENAI_API_KEY"),
+    "gemini": (
+        "https://generativelanguage.googleapis.com/v1beta/openai",
+        "gemini-3-pro",
+        "GEMINI_API_KEY",
+    ),
     "ollama": ("http://localhost:11434/v1", "llama3", ""),
     "vllm": ("http://localhost:8000/v1", "meta-llama/Llama-3-8B-Instruct", ""),
 }
@@ -27,7 +32,7 @@ def get_llm(cfg: LLMConfig) -> LLMClient:
         from harness.llm.anthropic import AnthropicClient
 
         return AnthropicClient(
-            model=cfg.model or "claude-3-5-sonnet-latest",
+            model=cfg.model or "claude-opus-5",
             api_key=cfg.api_key,
             api_key_env=cfg.api_key_env or "ANTHROPIC_API_KEY",
             base_url=cfg.base_url or "https://api.anthropic.com",

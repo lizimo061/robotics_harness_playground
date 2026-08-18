@@ -13,6 +13,7 @@ from harness.llm.base import (
     LLMResponse,
     TransientLLMError,
 )
+from harness.llm.capabilities import get_caps
 from harness.llm.retry import with_retries
 
 _TRANSIENT_STATUS = {429, 500, 502, 503, 504}
@@ -55,12 +56,20 @@ class AnthropicClient(LLMClient):
         system_parts = [m.content for m in messages if m.role == "system" and isinstance(m.content, str)]
         msgs = [m.to_anthropic() for m in messages if m.role != "system"]
 
+        caps = get_caps(self._model)
+
         payload: dict[str, Any] = {
             "model": self._model,
             "max_tokens": self._max_tokens if max_tokens is None else max_tokens,
             "messages": msgs,
-            "temperature": self._temperature if temperature is None else temperature,
         }
+
+        # Current Claude models (Opus 4.7+, Sonnet 5, Fable 5, ...) reject a
+        # non-default temperature with a 400. Steer those with prompting and
+        # output_config.effort instead; only send it where it is accepted.
+        if caps.sampling_params:
+            payload["temperature"] = self._temperature if temperature is None else temperature
+
         if system_parts:
             payload["system"] = "\n".join(system_parts)
         payload.update(self._extra)
