@@ -527,3 +527,37 @@ class TestEndEffectorFrameConversion(unittest.TestCase):
         out = np.asarray(env._to_env_action(
             Action(kind="ee_pose", value=[0.4, 0.0, 0.2, 0.0, 1.0, 0.0, 0.0]))).ravel()
         self.assertAlmostEqual(float(np.linalg.norm(out[3:7])), 1.0, places=5)
+
+
+class TestMeasuredGraspOffset(unittest.TestCase):
+    """The grasp offset is measured, not taken from the gripper's spec sheet.
+
+    RoboLab cites 162.8mm flange-to-fingertip for the Robotiq 2F-85. Sweeping the
+    flange height directly found the grasp ~3.7cm lower: flange z=0.160 lifted a
+    cube at z=0.034 by 78mm, while z=0.140 collided with its top. Using the spec
+    figure closed the gripper just above the object every time.
+    """
+
+    def test_the_default_matches_the_measured_grasp_height(self):
+        import inspect
+
+        import harness.envs.robolab as r
+        default = inspect.signature(r.RoboLabEnv.__init__).parameters["tcp_offset"].default
+        self.assertAlmostEqual(default, 0.126, places=3)
+
+    def test_a_target_at_an_object_puts_the_flange_at_the_grasp_height(self):
+        import numpy as np
+
+        import harness.envs.robolab as r
+        from harness.types import Action
+        # wrist down, expressed in eef-frame terms
+        base = r._quat_mul(np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32),
+                           r._quat_inv(r._EEF_OFFSET_ROT))
+        env = _env_for_action_tests(mode="ee_pose", space=_FakeAbsSpace(),
+                                    ee=(0.30, 0.0, 0.40),
+                                    quat=tuple(float(x) for x in base))
+        env._tcp_offset = 0.126
+        out = np.asarray(env._to_env_action(
+            Action(kind="ee_pose", value=[0.431, -0.097, 0.034]))).ravel()
+        # the measured grasp height for a cube at 0.034
+        self.assertAlmostEqual(float(out[2]), 0.160, places=3)

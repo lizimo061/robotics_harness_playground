@@ -106,15 +106,23 @@ class RoboLabEnv(Env):
         use_fabric: bool = False,
         headless: bool = True,
         action_mode: str = "ee_pose",  # "ee_pose" (abs IK) | "ee_delta" (rel IK) | "joint_position"
-        #: Distance from the controlled body to the fingertips, in metres.
+        #: Distance from the controlled body to the grasp point, in metres.
+        #:
         #: RoboLab's IK drives the gripper's BASE FLANGE (body_offset is left
-        #: commented out in DroidIKActionCfg) and the Robotiq 2F-85 fingertips are
-        #: 162.8mm below it, per the spec figure RoboLab cites. Commanding a
-        #: grasp at an object's own z therefore drives the fingers ~16cm through
-        #: the table: the IK saturates against it and nothing is ever picked up.
-        #: The adapter treats tool coordinates as fingertip space and converts, so
-        #: "move to the cube" means the fingers, not the flange.
-        tcp_offset: float = 0.1628,
+        #: commented out in DroidIKActionCfg), so a target expressed at an object's
+        #: own z would put the flange there and the fingers below the table. The
+        #: adapter treats tool coordinates as grasp-point space and converts.
+        #:
+        #: The value is MEASURED, not taken from the spec. RoboLab's comment cites
+        #: 162.8mm flange-to-fingertip for the Robotiq 2F-85, but sweeping the
+        #: flange height directly against a cube at z=0.034 found the grasp at
+        #: flange z=0.160 (cube lifted 78mm) while z=0.140 collided with the cube
+        #: top and pushed it down 13mm. That puts the effective offset at ~0.126m.
+        #: Using the spec figure instead placed every grasp ~3.7cm too high, which
+        #: closed the gripper just above the object every time -- and because the
+        #: approach sweeps were parameterised in that same wrong space, they
+        #: explored a window that could not contain the answer.
+        tcp_offset: float = 0.126,
         seed: int = 0,
         **kwargs: Any,
     ) -> None:
