@@ -34,6 +34,26 @@ def _fmt_vec(v) -> str:
     return "(" + ", ".join(f"{float(x):.3f}" for x in a) + ")"
 
 
+def _rotate_by_quat(vec, quat) -> np.ndarray:
+    """Rotate `vec` by the (w, x, y, z) quaternion `quat`.
+
+    Needed because the fingertip offset is fixed in the *gripper's* frame, not the
+    world's. Assuming it always points along world -z is right only while the
+    gripper hangs straight down; the moment the agent tilts the wrist, a fixed
+    world-space offset aims the grasp somewhere else entirely.
+    """
+    v = np.asarray(vec, dtype=np.float32).ravel()[:3]
+    q = np.asarray(quat, dtype=np.float32).ravel()[:4]
+    n = float(np.linalg.norm(q))
+    if n < 1e-6:
+        return v
+    w, x, y, z = q / n
+    # v' = v + 2w(q_vec x v) + 2 q_vec x (q_vec x v)
+    qv = np.array([x, y, z], dtype=np.float32)
+    t = 2.0 * np.cross(qv, v)
+    return (v + w * t + np.cross(qv, t)).astype(np.float32)
+
+
 def _to_numpy(x):
     if x is None:
         return None
@@ -441,9 +461,10 @@ class RoboLabEnv(Env):
                 target[:min(3, v.size)] += v[:min(3, v.size)]
             else:
                 target = cur  # hold position (e.g. a pure gripper command)
-            # the agent aims the fingertips; the IK steers the flange above them
+            # the agent aims the fingertips; the IK steers the flange, so undo the
+            # gripper's own offset in whatever direction the wrist is pointing
             flange = target.copy()
-            flange[2] += self._tcp_offset
+            flange[:3] = flange[:3] - self._tcp_vector()
             out = np.concatenate([flange, self._current_quat()])
         elif self._action_mode == "ee_delta":
             delta = np.zeros(3, dtype=np.float32)
@@ -631,9 +652,19 @@ class RoboLabEnv(Env):
         if p is None:
             return None
         arr = np.asarray(_to_numpy(p), dtype=np.float32).ravel().copy()
-        if arr.size >= 3:
-            arr[2] -= self._tcp_offset
+        if arr.size >= 3 and self._tcp_offset:
+            arr[:3] = arr[:3] + self._tcp_vector()
         return arr
+
+    def _tcp_vector(self) -> np.ndarray:
+        """Flange -> fingertip offset in the env frame, for the current wrist pose.
+
+        The offset lives along the gripper's local +z; with the wrist hanging down
+        that resolves to world -z, which is why a hardcoded -z looks correct until
+        the agent rotates the wrist.
+        """
+        local = np.array([0.0, 0.0, self._tcp_offset], dtype=np.float32)
+        return _rotate_by_quat(local, self._current_quat())
 
     def get_flange_pos(self):
         """The body the IK actually controls -- exposed for debugging."""

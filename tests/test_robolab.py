@@ -273,19 +273,38 @@ class TestToolCentrePoint(unittest.TestCase):
         env._tcp_offset = 0.1628
         return env
 
+    def _env_down(self, **kw):
+        """Wrist hanging straight down: local +z resolves to world -z."""
+        return self._env(quat=(0.0, 1.0, 0.0, 0.0), **kw)
+
     def test_a_grasp_target_is_raised_to_the_flange(self):
         import numpy as np
 
         from harness.types import Action
-        env = self._env(ee=(0.30, 0.0, 0.40))
+        env = self._env_down(ee=(0.30, 0.0, 0.40))
         out = np.asarray(env._to_env_action(
             Action(kind="ee_pose", value=[0.43, -0.10, 0.034]))).ravel()
         self.assertAlmostEqual(float(out[2]), 0.034 + 0.1628, places=4)
         self.assertAlmostEqual(float(out[0]), 0.43, places=5)  # x, y unaffected
 
+    def test_the_offset_follows_the_wrist_orientation(self):
+        """The offset is fixed in the gripper's frame, not the world's.
+
+        With the wrist rotated 90 degrees about y, the fingertips are displaced
+        along +x, so a fixed world -z correction would aim the grasp elsewhere.
+        """
+        import numpy as np
+
+        from harness.types import Action
+        env = self._env(ee=(0.30, 0.0, 0.40), quat=(0.7071, 0.0, 0.7071, 0.0))
+        out = np.asarray(env._to_env_action(
+            Action(kind="ee_pose", value=[0.43, 0.0, 0.20]))).ravel()
+        self.assertAlmostEqual(float(out[0]), 0.43 - 0.1628, places=3)
+        self.assertAlmostEqual(float(out[2]), 0.20, places=3)
+
     def test_the_reported_pose_is_the_fingertip(self):
         import numpy as np
-        env = self._env(ee=(0.30, 0.0, 0.40))
+        env = self._env_down(ee=(0.30, 0.0, 0.40))
         tip = np.asarray(env.get_ee_pos()).ravel()
         self.assertAlmostEqual(float(tip[2]), 0.40 - 0.1628, places=4)
         flange = np.asarray(env.get_flange_pos()).ravel()
@@ -296,7 +315,7 @@ class TestToolCentrePoint(unittest.TestCase):
         import numpy as np
 
         from harness.types import Action
-        env = self._env(ee=(0.30, 0.0, 0.40))
+        env = self._env_down(ee=(0.30, 0.0, 0.40))
         here = np.asarray(env.get_ee_pos()).ravel()
         out = np.asarray(env._to_env_action(
             Action(kind="ee_pose", value=here))).ravel()
@@ -306,7 +325,7 @@ class TestToolCentrePoint(unittest.TestCase):
         import numpy as np
 
         from harness.types import Action
-        env = self._env(ee=(0.30, 0.0, 0.40))
+        env = self._env_down(ee=(0.30, 0.0, 0.40))
         env._tcp_offset = 0.0
         out = np.asarray(env._to_env_action(
             Action(kind="ee_pose", value=[0.43, 0.0, 0.034]))).ravel()
