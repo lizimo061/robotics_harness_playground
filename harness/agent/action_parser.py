@@ -28,14 +28,29 @@ def _strip_fence(text: str) -> str:
     return t
 
 
-def extract_json(text: str) -> Optional[dict]:
-    """Return the first balanced JSON object in the text, or None."""
+def extract_json(text: str) -> Optional[Any]:
+    """Return the first balanced top-level JSON value (object or array) in the
+    text, or None.
+
+    Some callers (e.g. skill planning) ask the model for a bare JSON list;
+    this scans for whichever bracket -- ``{`` or ``[`` -- appears first and
+    balances that bracket type only. That is sufficient for well-formed JSON:
+    any bracket of the other kind nested inside is itself balanced before the
+    outer one closes, so it never perturbs the outer depth count.
+    """
     if not text:
         return None
     text = _strip_fence(text)
-    start = text.find("{")
-    if start == -1:
+    start = None
+    open_ch = None
+    for i, c in enumerate(text):
+        if c in "{[":
+            start = i
+            open_ch = c
+            break
+    if start is None:
         return None
+    close_ch = "}" if open_ch == "{" else "]"
     depth = 0
     in_str = False
     esc = False
@@ -52,9 +67,9 @@ def extract_json(text: str) -> Optional[dict]:
             continue
         if c == '"':
             in_str = True
-        elif c == "{":
+        elif c == open_ch:
             depth += 1
-        elif c == "}":
+        elif c == close_ch:
             depth -= 1
             if depth == 0:
                 try:
@@ -76,7 +91,7 @@ def _to_array(value: Any) -> Optional[np.ndarray]:
 def parse_action(text: str, action_space: Optional[ActionSpace] = None) -> Action:
     """Parse an LLM response into an Action (never raises; noop on garbage)."""
     data = extract_json(text)
-    if data is None:
+    if not isinstance(data, dict):
         return Action(kind="noop", comment=(text or "").strip()[:80])
 
     comment = str(data.get("comment") or "")
