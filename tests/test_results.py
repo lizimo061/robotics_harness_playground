@@ -265,3 +265,87 @@ class TestRunnerIsolation(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestInfraFailures(unittest.TestCase):
+    def test_gpu_oom_is_an_environment_fault(self):
+        from harness.eval.infra import TIER_ENVIRONMENT, classify_infra_failure
+
+        got = classify_infra_failure("RuntimeError: CUDA out of memory. Tried to allocate 2 GiB")
+        self.assertEqual(got["tier"], TIER_ENVIRONMENT)
+        self.assertEqual(got["reason"], "out_of_memory")
+
+    def test_missing_asset_is_ambiguous_not_environment(self):
+        from harness.eval.infra import TIER_AMBIGUOUS, classify_infra_failure
+
+        got = classify_infra_failure("Could not open asset @/assets/banana.usd@")
+        self.assertEqual(got["tier"], TIER_AMBIGUOUS)
+
+    def test_no_evidence_is_none_not_a_guess(self):
+        from harness.eval.infra import classify_infra_failure
+
+        self.assertIsNone(classify_infra_failure(None))
+        self.assertIsNone(classify_infra_failure("the gripper missed the banana"))
+
+    def test_infra_counts_never_change_the_denominator(self):
+        from harness.eval.infra import summarize_infra
+
+        rows = [
+            {"success": False, "infra_failure": {"reason": "out_of_memory", "tier": "environment"}},
+            {"success": False, "infra_failure": {"reason": "missing_asset", "tier": "ambiguous"}},
+            {"success": True, "infra_failure": None},
+        ]
+        out = summarize_infra(rows)
+        self.assertEqual(out["environment_failures"], 1)
+        self.assertEqual(out["ambiguous_failures"], 1)
+        self.assertTrue(out["denominator_unchanged"])
+        # the success rate is computed independently and is untouched by the above
+        self.assertAlmostEqual(summarize_records(
+            [{**r, "policy": "m", "env_name": "t"} for r in rows]
+        )["models"]["m"]["success_rate"], 1 / 3, places=3)
+
+    def test_no_infra_flags_yields_empty(self):
+        from harness.eval.infra import summarize_infra
+
+        self.assertEqual(summarize_infra([{"success": True}]), {})
+
+
+class TestReportingRule(unittest.TestCase):
+    def test_rule_is_published_with_the_run(self):
+        import tempfile as _t
+
+        from harness.eval.results import REPORTING_RULE
+
+        with _t.TemporaryDirectory() as d:
+            s = run_eval(HarnessConfig.from_dict({
+                "seed": 0,
+                "llm": {"provider": "mock", "model": "m",
+                        "extra": {"responses": ['{"tool":"done","args":{}}']}},
+                "env": {"name": "tabletop", "task": "pick_place"},
+                "agent": {"mode": "tools", "max_steps": 3},
+                "eval": {"episodes": 2, "log_dir": d, "verbose": False},
+                "viz": {"enabled": False, "backend": "none"},
+            }))
+            self.assertEqual(s["reporting_rule"], REPORTING_RULE)
+            # the two choices that most move a reported number must be stated
+            self.assertIn("never excluded", s["reporting_rule"]["errored_episodes"])
+            self.assertIn("denominator unchanged", s["reporting_rule"]["infra_failures"])
+
+    def test_per_instance_details_uses_swebench_field_names(self):
+        import json as _j
+        import tempfile as _t
+
+        with _t.TemporaryDirectory() as d:
+            s = run_eval(HarnessConfig.from_dict({
+                "seed": 0,
+                "llm": {"provider": "mock", "model": "m",
+                        "extra": {"responses": ['{"tool":"done","args":{}}']}},
+                "env": {"name": "tabletop", "task": "pick_place"},
+                "agent": {"mode": "tools", "max_steps": 3},
+                "eval": {"episodes": 2, "log_dir": d, "verbose": False},
+                "viz": {"enabled": False, "backend": "none"},
+            }))
+            data = _j.loads(Path(s["per_instance_details"]).read_text())
+            self.assertEqual(len(data), 2)
+            entry = next(iter(data.values()))
+            self.assertEqual(sorted(entry), ["api_calls", "cost", "resolved"])

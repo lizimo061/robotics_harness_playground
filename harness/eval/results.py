@@ -24,6 +24,7 @@ from typing import Any, Optional
 
 import numpy as np
 
+from harness.eval.infra import classify_infra_failure
 from harness.types import Episode
 
 
@@ -149,6 +150,7 @@ class TrialRecord:
     cost_usd: Optional[float] = None
     wall_clock_s: Optional[float] = None
     harness_version: str = ""
+    infra_failure: Optional[dict] = None   # {"reason","tier"} -- advisory only
 
     def to_dict(self) -> dict:
         return {k: _num(v) for k, v in asdict(self).items()}
@@ -212,6 +214,9 @@ def record_from_episode(
         mode=mode or str(ep.metadata.get("mode", "")),
         rewards=rewards,
         failure_mode=classify_failure(ep, error=error),
+        infra_failure=classify_infra_failure(
+            f"{type(error).__name__}: {error}" if error is not None else None
+        ),
         llm_calls=ep.metadata.get("llm_calls"),
         usage=ep.metadata.get("usage") or {},
         cost_usd=ep.metadata.get("cost_usd"),
@@ -276,3 +281,43 @@ def load_results(run_dir) -> list[dict]:
         except json.JSONDecodeError:
             continue  # partial write from a hard kill
     return out
+
+
+#: How this harness turns episodes into a reported score. Published alongside
+#: every run because the rule itself moves numbers: on a comparison of two
+#: public SWE-bench submissions, counting missing submissions as failures
+#: rather than excluding them accounted for 2.3pp of a 15.6pp reported gap.
+#: A score without its rule is not interpretable.
+REPORTING_RULE = {
+    "version": 1,
+    "success_gate": "reward_dict['success'] == 1, as emitted by the task",
+    "score": "successes count 1.0; failures contribute fractional subtask progress",
+    "errored_episodes": "counted as failures, never excluded from the denominator",
+    "timeouts": "counted as failures (failure_mode=agent_timeout)",
+    "infra_failures": "flagged by tier and reported separately; denominator unchanged",
+    "harness_faults": "parse/context/provider errors reported separately as "
+                      "not_model_fault; still counted as failures in the rate",
+    "attempts_per_task": "single attempt per (task, seed); no best-of-k selection",
+    "interval": "Beta(k+1, n-k+1) 95% credible interval",
+    "reliability": "pass^k averaged per task, tasks with fewer than k trials skipped",
+}
+
+
+def write_per_instance_details(run_dir, records) -> "Path":
+    """Emit per_instance_details.json using SWE-bench's field names.
+
+    Their schema is {instance: {cost, api_calls, resolved}} -- the only
+    battle-tested cost/efficiency leaderboard shape among the benchmarks
+    surveyed, so the names are matched exactly for tooling compatibility.
+    """
+    out: dict[str, dict] = {}
+    for r in records:
+        key = f"{r.get('env_name') or 'task'}::seed{r.get('seed')}"
+        out[key] = {
+            "cost": r.get("cost_usd"),
+            "api_calls": r.get("llm_calls"),
+            "resolved": bool(r.get("success")),
+        }
+    p = Path(run_dir) / "per_instance_details.json"
+    p.write_text(json.dumps(out, indent=2), encoding="utf-8")
+    return p

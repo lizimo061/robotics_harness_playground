@@ -10,7 +10,13 @@ from harness.config import HarnessConfig, VizConfig
 from harness.envs.registry import get_env
 from harness.eval.logger import TrajectoryLogger
 from harness.eval.metrics import summarize, summarize_records
-from harness.eval.results import ResultsWriter, record_from_episode
+from harness.eval.infra import summarize_infra
+from harness.eval.results import (
+    REPORTING_RULE,
+    ResultsWriter,
+    record_from_episode,
+    write_per_instance_details,
+)
 from harness.llm.registry import get_llm
 from harness.types import Episode
 from harness.utils.logging import get_logger
@@ -123,8 +129,13 @@ def run_eval(cfg: HarnessConfig) -> dict:
     summary = summarize(episodes)
     summary["run_dir"] = str(writer.dir)
     summary["results_file"] = str(writer.path)
+    summary["reporting_rule"] = REPORTING_RULE
     if records:
         summary["leaderboard"] = summarize_records(records)
+        infra = summarize_infra(records)
+        if infra:
+            summary["infra_failures"] = infra
+        summary["per_instance_details"] = str(write_per_instance_details(writer.dir, records))
     if cfg.eval.verbose:
         log.info("summary: success_rate=%.3f ci95=%s width=%.1fpp cost=%s",
                  summary.get("success_rate", 0.0), summary.get("success_ci_95"),
