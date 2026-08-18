@@ -36,3 +36,12 @@ gripper is a separate channel (0 open .. 1 closed) carried on Action.gripper.
 
 ## Related
 - guides/add-environment.md, modules/tasks.md, modules/tools.md (query API users).
+
+## The seed contract
+
+`reset(seed=n)` must produce **instance n**, not merely reseed the RNG. An env
+that restores a layout fixed at construction time makes every seed replay the
+identical episode, which turns a grid of N seeds into one trial repeated N times
+-- pseudo-replication that shrinks every confidence interval while looking like
+real sampling. `TabletopEnv` regenerates its layout when the seed changes, and
+leaves an explicitly supplied `task_spec` alone (that layout is the caller's).

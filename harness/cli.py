@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -62,7 +63,28 @@ def _print_leaderboard(summary: dict) -> None:
     print(f"\nresults: {summary.get('job_dir') or summary.get('run_dir')}")
 
 
+#: Subcommand names. A bare `harness <config.yaml>` must keep working, so the
+#: first token is routed by hand: argparse matches a leading positional against
+#: the subparser choices and rejects anything else, which broke the original
+#: single-config surface the moment `job` was added.
+_SUBCOMMANDS = ("job", "report")
+
+
 def main(argv: Optional[Sequence[str]] = None) -> None:
+    tokens = list(sys.argv[1:] if argv is None else argv)
+    if tokens and not tokens[0].startswith("-") and tokens[0] not in _SUBCOMMANDS:
+        single = argparse.ArgumentParser(prog="harness",
+                                         description="Run one (env, model) evaluation.")
+        single.add_argument("config", help="path to a YAML or JSON config file")
+        single.add_argument("--episodes", type=int, default=None,
+                            help="override the episode count")
+        one = single.parse_args(tokens)
+        cfg = load_config(one.config)
+        if one.episodes is not None:
+            cfg.eval.episodes = one.episodes
+        run_eval(cfg)
+        return
+
     parser = argparse.ArgumentParser(description="Run a robotics harness task or job.")
     sub = parser.add_subparsers(dest="command")
 

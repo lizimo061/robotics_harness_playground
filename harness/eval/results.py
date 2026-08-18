@@ -39,6 +39,8 @@ class FailureMode:
     NONE = "none"                      # succeeded
     TASK_FAILED = "task_failed"         # ran to completion, success check false
     AGENT_TIMEOUT = "agent_timeout"     # step budget exhausted
+    NO_PROGRESS = "no_progress"         # spent the whole turn budget without ever
+                                        # stepping the env (e.g. querying in a loop)
     PARSE_FAILURE = "parse_failure"     # output unreadable -- format, not capability
     CONTEXT_EXCEEDED = "context_exceeded"
     REFUSAL = "refusal"
@@ -97,21 +99,30 @@ def classify_failure(ep: Episode, *, error: Optional[BaseException] = None) -> s
     if ep.success:
         return FailureMode.NONE
 
-    # a run made entirely of unparseable replies is a format failure, not a
-    # capability one: parse_action degrades to a commentless noop.
+    # A run made entirely of unparseable replies is a format failure, not a
+    # capability one: parse_action degrades to a commentless noop. This only
+    # applies to episodes an LLM actually drove -- the null baseline emits noops
+    # by design, and calling that a parse failure both slanders the harness and
+    # inflates not_model_fault with 100% of the baseline's trials.
     acts = [a for a in ep.actions if a.kind != "stop"]
-    if acts:
+    if acts and ep.metadata.get("llm_calls"):
         noops = sum(1 for a in acts if a.kind == "noop" and a.value is None and a.gripper is None)
         if noops == len(acts):
             return FailureMode.PARSE_FAILURE
 
     if ep.infos and ep.infos[-1].get("truncated"):
         return FailureMode.AGENT_TIMEOUT
-    # Both keys must actually be present: `None == None` would otherwise make
+    # Compare turns used against the *turn* budget. Comparing env steps against
+    # it is a category error: query tools burn a turn without stepping the env,
+    # so an agent that queried itself to death looked like a task failure.
+    # Both keys must actually be present -- `None == None` would otherwise make
     # every metadata-less failure look like a timeout.
-    steps, budget = ep.metadata.get("steps"), ep.metadata.get("max_steps")
-    if steps is not None and budget is not None and steps >= budget:
-        return FailureMode.AGENT_TIMEOUT
+    calls, budget = ep.metadata.get("llm_calls"), ep.metadata.get("max_steps")
+    if calls is not None and budget is not None and calls >= budget:
+        # Never touching the environment is a different diagnosis from trying
+        # and running out of time, and it points at the control loop rather
+        # than at the task.
+        return FailureMode.NO_PROGRESS if ep.steps == 0 else FailureMode.AGENT_TIMEOUT
     return FailureMode.TASK_FAILED
 
 

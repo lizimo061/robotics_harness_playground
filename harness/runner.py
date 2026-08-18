@@ -44,6 +44,32 @@ def _make_live_viewer(viz: VizConfig):
     return None
 
 
+def _write_episode_video(recorder, start: int, cfg, index: int, seed: int,
+                         success: Optional[bool]) -> Optional[Path]:
+    """Write one episode's frames to `<stem>_ep<i>_seed<n>_<outcome><ext>`.
+
+    Naming the outcome into the filename is the point: hunting for the failure
+    case in a directory of look-alike videos otherwise means opening each one.
+    """
+    from harness.viz.video import write_video
+
+    frames = [s.frame for s in recorder.steps[start:] if s.frame is not None]
+    if not frames:
+        log.warning("episode %d captured no frames; is the env's render() returning None?", index)
+        return None
+    outcome = "success" if success else "fail"
+    base = Path(cfg.viz.video)
+    out = base.with_name(f"{base.stem}_ep{index}_seed{seed}_{outcome}{base.suffix or '.mp4'}")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        write_video(frames, out, fps=cfg.viz.fps)
+    except Exception as e:  # noqa: BLE001 - a missing codec must not lose the run
+        log.warning("could not write %s (%s: %s)", out, type(e).__name__, e)
+        return None
+    log.info("video: %s (%d frames, %s)", out, len(frames), outcome)
+    return out
+
+
 def run_eval(cfg: HarnessConfig) -> dict:
     """Run the configured episodes and return a summary dict."""
     set_seed(cfg.seed)
@@ -96,6 +122,7 @@ def run_eval(cfg: HarnessConfig) -> dict:
 
     episodes: list[Episode] = []
     records: list[dict] = []
+    ep_start = 0
     try:
         for i in range(cfg.eval.episodes):
             seed = cfg.seed + i
@@ -108,6 +135,13 @@ def run_eval(cfg: HarnessConfig) -> dict:
                 ep = Episode(metadata={"mode": cfg.agent.mode, "llm": llm.name, "env": env.name})
                 log.warning("episode %d raised %s: %s", i, type(e).__name__, e)
             episodes.append(ep)
+
+            # Slice this episode's frames before the next one appends to the
+            # recorder: it accumulates across episodes, so writing at the end
+            # would splice every episode into one video with no boundary.
+            if recorder is not None and cfg.viz.video:
+                _write_episode_video(recorder, ep_start, cfg, i, seed, ep.success)
+                ep_start = len(recorder.steps)
 
             rec = record_from_episode(
                 ep, env,

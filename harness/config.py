@@ -107,6 +107,10 @@ class VizConfig:
     enabled: bool = True
     backend: str = "html"  # html (replay file) | console (live print) | live (matplotlib) | none
     output: str = "logs/viz.html"  # path for the html backend
+    #: when set, also write one video file per episode. The episode index, seed
+    #: and outcome are appended to the stem, because a directory of videos is
+    #: only useful if you can tell which one is the failure without opening them.
+    video: str = ""
     fps: int = 8
     capture_frames: bool = True
     title: str = ""

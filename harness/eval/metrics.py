@@ -99,11 +99,30 @@ def oracle_steps_by_task(records: Sequence[dict]) -> dict:
     return out
 
 
+def oracle_steps_by_instance(records: Sequence[dict]) -> dict:
+    """Oracle step count per (task, seed) -- the *paired* efficiency denominator.
+
+    Preferred over the per-task median whenever seeds vary the layout, because a
+    model should be compared against the oracle on the identical instance, not
+    against a task-level average that mixes easy and hard layouts. It also makes
+    the oracle's own ratio exactly 1.0; against a median it drifts off 1.0 and
+    reads as "more efficient than optimal".
+    """
+    out: dict[tuple, int] = {}
+    for r in records:
+        if str(r.get("policy") or "").startswith("oracle") and r.get("success"):
+            steps = int(r.get("episode_step") or 0)
+            if steps > 0:
+                out[(str(r.get("env_name") or "?"), r.get("seed"))] = steps
+    return out
+
+
 def summarize_records(
     records: Sequence[dict],
     *,
     reliability_k: Iterable[int] = (2, 5, 10),
     oracle_steps: Optional[dict] = None,
+    oracle_steps_per_instance: Optional[dict] = None,
 ) -> dict:
     """Summarise a flat per-episode log, grouped by model then task.
 
@@ -187,11 +206,15 @@ def summarize_records(
         # Efficiency, reported beside success and never folded into it: one
         # SPL number cannot distinguish "half the episodes failed" from "all
         # succeeded at twice the optimal path".
-        if oracle_steps:
+        if oracle_steps or oracle_steps_per_instance:
             ratios, spl = [], []
             for r in rows:
                 task = str(r.get("env_name") or "?")
-                ref = oracle_steps.get(task)
+                # Pair on the exact instance when we have it; fall back to the
+                # per-task median only for instances the oracle never solved.
+                ref = (oracle_steps_per_instance or {}).get((task, r.get("seed")))
+                if not ref:
+                    ref = (oracle_steps or {}).get(task)
                 took = int(r.get("episode_step") or 0)
                 if not ref:
                     continue

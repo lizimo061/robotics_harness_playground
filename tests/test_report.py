@@ -222,3 +222,130 @@ class TestEscaping(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCliRouting(unittest.TestCase):
+    """`harness <config.yaml>` must survive the addition of subcommands.
+
+    argparse matches a leading positional against the subparser choices and
+    rejects anything else, so adding `job` silently broke the original single
+    config surface -- with an error that blamed the config path.
+    """
+
+    def test_a_config_path_is_not_mistaken_for_a_subcommand(self):
+        from unittest import mock
+
+        from harness import cli
+        with mock.patch.object(cli, "load_config") as lc, \
+             mock.patch.object(cli, "run_eval") as re_:
+            cli.main(["configs/toy_tabletop.yaml"])
+        lc.assert_called_once_with("configs/toy_tabletop.yaml")
+        re_.assert_called_once()
+
+    def test_episodes_override_still_applies(self):
+        from unittest import mock
+
+        from harness import cli
+        cfg = mock.MagicMock()
+        with mock.patch.object(cli, "load_config", return_value=cfg), \
+             mock.patch.object(cli, "run_eval"):
+            cli.main(["some.yaml", "--episodes", "3"])
+        self.assertEqual(cfg.eval.episodes, 3)
+
+    def test_subcommands_still_route_to_their_own_parsers(self):
+        from unittest import mock
+
+        from harness import cli
+        with mock.patch("harness.eval.report.write_report", return_value="x.html") as wr:
+            cli.main(["report", "some/job", "-o", "x.html"])
+        wr.assert_called_once()
+
+
+class TestSeedVariation(unittest.TestCase):
+    """A grid of N seeds must be N different instances, not one instance N times.
+
+    reset(seed=) originally reseeded only the RNG while restoring the layout
+    captured at construction, so every seed replayed the identical episode. The
+    grid still reported n = tasks x seeds x agents, so every confidence interval
+    was computed on roughly sqrt(N) times more independence than existed.
+    """
+
+    TASKS = ("pick_place", "pick_place_obstacle", "push", "stack", "sort", "reach_avoid")
+
+    def test_distinct_seeds_give_distinct_layouts(self):
+        from harness.envs.tabletop import TabletopEnv
+        for task in self.TASKS:
+            states = set()
+            for seed in range(5):
+                env = TabletopEnv(task=task)
+                env.reset(seed=seed)
+                states.add(env.get_text_state())
+                env.close()
+            with self.subTest(task=task):
+                self.assertEqual(len(states), 5, f"{task}: seeds collapsed to one layout")
+
+    def test_a_reused_env_also_varies(self):
+        """The runner resets one env in a loop; it must not be stuck on seed 0."""
+        from harness.envs.tabletop import TabletopEnv
+        env = TabletopEnv(task="pick_place")
+        states = set()
+        for seed in range(5):
+            env.reset(seed=seed)
+            states.add(env.get_text_state())
+        env.close()
+        self.assertEqual(len(states), 5)
+
+    def test_the_same_seed_is_still_reproducible(self):
+        from harness.envs.tabletop import TabletopEnv
+        env = TabletopEnv(task="stack")
+        env.reset(seed=3)
+        first = env.get_text_state()
+        env.reset(seed=7)
+        env.reset(seed=3)
+        self.assertEqual(env.get_text_state(), first)
+        env.close()
+
+    def test_an_explicit_task_spec_is_never_silently_replaced(self):
+        """Honouring a seed must not mean discarding the caller's own layout."""
+        from harness.envs.tabletop import TabletopEnv
+        from harness.tasks import generate_task
+        spec = generate_task("pick_place", seed=99)
+        env = TabletopEnv(task_spec=spec)
+        env.reset(seed=0)
+        before = env.get_text_state()
+        env.reset(seed=12345)
+        self.assertEqual(env.get_text_state(), before)
+        self.assertIs(env.task_spec, spec)
+        env.close()
+
+
+class TestPairedOracleDenominator(unittest.TestCase):
+    def test_the_oracle_scores_exactly_one_against_itself(self):
+        """Against a per-task median the oracle's own ratio drifts below 1.0,
+        which reads as "more efficient than optimal"."""
+        from harness.eval.metrics import (
+            oracle_steps_by_instance,
+            oracle_steps_by_task,
+            summarize_records,
+        )
+        recs = [{"env_name": "t", "policy": "oracle", "seed": s, "success": True,
+                 "score": 1.0, "episode_step": steps}
+                for s, steps in enumerate([4, 9, 20])]
+        lb = summarize_records(recs, oracle_steps=oracle_steps_by_task(recs),
+                               oracle_steps_per_instance=oracle_steps_by_instance(recs))
+        self.assertEqual(lb["models"]["oracle"]["steps_vs_oracle"], 1.0)
+
+    def test_it_falls_back_to_the_task_median_for_unpaired_instances(self):
+        from harness.eval.metrics import (
+            oracle_steps_by_instance,
+            oracle_steps_by_task,
+            summarize_records,
+        )
+        recs = [{"env_name": "t", "policy": "oracle", "seed": 0, "success": True,
+                 "score": 1.0, "episode_step": 10},
+                # seed 1 has no oracle run, so the model's ratio uses the median
+                {"env_name": "t", "policy": "m", "seed": 1, "success": True,
+                 "score": 1.0, "episode_step": 20}]
+        lb = summarize_records(recs, oracle_steps=oracle_steps_by_task(recs),
+                               oracle_steps_per_instance=oracle_steps_by_instance(recs))
+        self.assertEqual(lb["models"]["m"]["steps_vs_oracle"], 2.0)

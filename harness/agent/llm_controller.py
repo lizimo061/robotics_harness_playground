@@ -150,6 +150,12 @@ class LLMController:
 
     def _record_usage(self, ep: Episode) -> None:
         ep.metadata["llm_calls"] = self._llm_calls
+        # The budget is in LLM turns, not environment steps -- a query tool
+        # consumes a turn without stepping the env, and one skill can step it
+        # many times. Recording it lets classify_failure tell "spent the whole
+        # budget" apart from "acted and got it wrong"; without it that branch
+        # never fired and every exhausted budget was filed as task_failed.
+        ep.metadata["max_steps"] = self._max_steps
         ep.metadata["usage"] = self._usage.to_dict()
         ep.metadata["cost_usd"] = round(self._cost_usd, 6) if self._cost_known else None
 

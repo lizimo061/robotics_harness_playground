@@ -31,7 +31,11 @@ from typing import Any, Callable, Optional
 
 from harness.eval.infra import classify_infra_failure, summarize_infra
 from harness.eval.lock import LockMismatch, RunLock
-from harness.eval.metrics import oracle_steps_by_task, summarize_records
+from harness.eval.metrics import (
+    oracle_steps_by_instance,
+    oracle_steps_by_task,
+    summarize_records,
+)
 from harness.eval.results import (
     REPORTING_RULE,
     ResultsWriter,
@@ -297,6 +301,7 @@ def run_job(cfg: JobConfig, *, resume: bool = True) -> dict:
 def build_summary(cfg: JobConfig, records: list[dict]) -> dict:
     """Aggregate records into the leaderboard view; recomputable from disk."""
     oracle = oracle_steps_by_task(records)
+    oracle_paired = oracle_steps_by_instance(records)
     summary = {
         "job_name": cfg.job_name,
         "job_dir": str(cfg.dir),
@@ -308,7 +313,8 @@ def build_summary(cfg: JobConfig, records: list[dict]) -> dict:
         "seeds": list(cfg.seeds),
         "reporting_rule": REPORTING_RULE,
         "oracle_steps": oracle or None,
-        "leaderboard": summarize_records(records, oracle_steps=oracle),
+        "leaderboard": summarize_records(records, oracle_steps=oracle,
+                                         oracle_steps_per_instance=oracle_paired),
     }
     infra = summarize_infra(records)
     if infra:
@@ -383,5 +389,7 @@ def regrade(
         "down": down,
         "success_before": round(mean_before, 4),
         "success_after": round(mean_after, 4),
-        "leaderboard": summarize_records(new_rows, oracle_steps=oracle_steps_by_task(new_rows)),
+        "leaderboard": summarize_records(
+            new_rows, oracle_steps=oracle_steps_by_task(new_rows),
+            oracle_steps_per_instance=oracle_steps_by_instance(new_rows)),
     }

@@ -161,8 +161,19 @@ class TestFailureClassification(unittest.TestCase):
         self.assertEqual(classify_failure(Episode(success=True)), FailureMode.NONE)
 
     def test_all_unparseable_replies_is_a_parse_failure_not_a_capability_one(self):
-        ep = Episode(actions=[Action(kind="noop"), Action(kind="noop")])
+        ep = Episode(actions=[Action(kind="noop"), Action(kind="noop")],
+                     metadata={"llm_calls": 2})
         self.assertEqual(classify_failure(ep), FailureMode.PARSE_FAILURE)
+
+    def test_a_baselines_deliberate_inaction_is_not_a_parse_failure(self):
+        """The null agent emits noops by design.
+
+        Classifying that as a format failure both slanders the harness and puts
+        100% of the baseline's trials into not_model_fault, so a healthy board
+        reports a wall of harness faults it did not cause.
+        """
+        ep = Episode(actions=[Action(kind="noop"), Action(kind="noop")])
+        self.assertNotEqual(classify_failure(ep), FailureMode.PARSE_FAILURE)
 
     def test_real_actions_that_miss_are_task_failures(self):
         ep = Episode(actions=[Action(kind="ee_pose", value=[0.1, 0.2])])
