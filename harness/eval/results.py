@@ -323,5 +323,6 @@ def write_per_instance_details(run_dir, records) -> "Path":
             "resolved": bool(r.get("success")),
         }
     p = Path(run_dir) / "per_instance_details.json"
+    p.parent.mkdir(parents=True, exist_ok=True)  # summaries can be rebuilt into a fresh tree
     p.write_text(json.dumps(out, indent=2), encoding="utf-8")
     return p

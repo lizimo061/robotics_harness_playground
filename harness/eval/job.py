@@ -301,6 +301,11 @@ def build_summary(cfg: JobConfig, records: list[dict]) -> dict:
         "job_name": cfg.job_name,
         "job_dir": str(cfg.dir),
         "trials": len(records),
+        # The *configured* grid, not the grid that happened to produce records.
+        # A task whose every trial died must still appear downstream, otherwise
+        # a report renders a complete-looking board with a column missing.
+        "tasks": list(cfg.tasks),
+        "seeds": list(cfg.seeds),
         "reporting_rule": REPORTING_RULE,
         "oracle_steps": oracle or None,
         "leaderboard": summarize_records(records, oracle_steps=oracle),
