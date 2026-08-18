@@ -64,6 +64,8 @@ class TabletopEnv(Env):
                 self._targets[name] = o["target"]
             if o.get("role"):
                 self._roles[name] = o["role"]
+        #: pristine copy of the initial layout, restored on every reset()
+        self._objects_home = {k: v.copy() for k, v in self._objects.items()}
         self._goals: dict[str, np.ndarray] = {k: np.asarray(v, dtype=float) for k, v in self.task_spec.goals.items()}
         self._obstacles: list[dict] = [dict(o) for o in self.task_spec.obstacles]
 
@@ -105,6 +107,12 @@ class TabletopEnv(Env):
     def reset(self, *, seed: Optional[int] = None) -> Obs:
         if seed is not None:
             self._rng = np.random.default_rng(seed)
+        # Restore object poses, not just the arm. step() carries a grasped
+        # object by writing self._objects[name], so without this an episode
+        # inherits the previous one's layout: once a task is solved the object
+        # stays at its goal and every later episode starts already successful.
+        # That silently inflates any multi-episode success rate.
+        self._objects = {k: v.copy() for k, v in self._objects_home.items()}
         self._ee = self._ee_home.copy()
         self._gripper = 0.0
         self._grasped = None
@@ -251,6 +259,48 @@ class TabletopEnv(Env):
                 lines.append(f"  {o['name']} ({o['pos'][0]:.3f}, {o['pos'][1]:.3f}) r={o.get('radius', 0.1):.2f}")
         lines.append(f"Distance to success: {self._primary_cost():.3f}")
         return "\n".join(lines)
+
+    def reward_dict(self) -> dict:
+        """Score this episode's outcome. The task owns its own scoring.
+
+        Beyond the binary gate, report the fraction of per-object goals met so
+        a near-miss is distinguishable from never moving -- graded metrics
+        separate policies with far fewer trials than binary success does.
+        """
+        placed = total = 0
+        for name, pos in self._objects.items():
+            goal_name = self._targets.get(name)
+            goal = self._goals.get(goal_name) if goal_name else None
+            if goal is None:
+                continue
+            total += 1
+            if float(np.linalg.norm(pos - goal)) < self._goal_radius:
+                placed += 1
+
+        success = self._check_success() and not self._collided
+        out = {
+            "success": 1 if success else 0,
+            "sim_steps": self._steps,
+            "collided": 1 if self._collided else 0,
+            "distance_to_goal": round(self._primary_cost(), 4),
+            "ee_path_length": round(self._path_length(), 4),
+        }
+        if total:
+            out["subtasks_completed"] = placed
+            out["subtasks_total"] = total
+            out["score"] = 1.0 if success else round(placed / total, 4)
+        return out
+
+    def _path_length(self) -> float:
+        """End-effector path length, the efficiency term for an SPL analogue."""
+        if len(self._trail) < 2:
+            return 0.0
+        return float(
+            sum(
+                np.linalg.norm(np.asarray(b) - np.asarray(a))
+                for a, b in zip(self._trail, self._trail[1:])
+            )
+        )
 
     def list_objects(self) -> list[str]:
         return list(self._objects.keys())

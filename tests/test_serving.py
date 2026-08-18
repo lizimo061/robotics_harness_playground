@@ -1,5 +1,6 @@
 import threading
 import unittest
+from unittest import mock
 from http.server import ThreadingHTTPServer
 
 import httpx
@@ -24,6 +25,18 @@ class TestPolicySessionManager(unittest.TestCase):
 
 
 class TestServe(unittest.TestCase):
+    def setUp(self):
+        # A loopback server must not be routed through a developer's proxy.
+        # httpx also rejects the `socks://` scheme some shells export (it
+        # wants socks5://), which fails this test before it reaches the server.
+        self._patch = mock.patch.dict("os.environ", {
+            "NO_PROXY": "*", "no_proxy": "*",
+            "http_proxy": "", "https_proxy": "",
+            "ALL_PROXY": "", "all_proxy": "",
+        }, clear=False)
+        self._patch.start()
+        self.addCleanup(self._patch.stop)
+
     def test_http_roundtrip(self):
         llm = get_llm(LLMConfig(provider="mock", extra={"script": SCRIPT}))
         mgr = PolicySessionManager(llm, action_dim=8)

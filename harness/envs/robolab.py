@@ -29,6 +29,11 @@ from harness.utils.logging import get_logger
 log = get_logger("harness.envs.robolab")
 
 
+def _fmt_vec(v) -> str:
+    a = np.asarray(v).ravel()
+    return "(" + ", ".join(f"{float(x):.3f}" for x in a) + ")"
+
+
 def _to_numpy(x):
     if x is None:
         return None
@@ -84,6 +89,9 @@ class RoboLabEnv(Env):
         self._seed = seed
         self._use_fabric = use_fabric
         self._num_envs = num_envs
+        self._last_image = None
+        self._last_proprio: dict = {}
+        self._step_idx = 0
 
     # -- spaces ----------------------------------------------------------- #
     @property
@@ -110,22 +118,34 @@ class RoboLabEnv(Env):
 
     # -- lifecycle -------------------------------------------------------- #
     def reset(self, *, seed: Optional[int] = None) -> Obs:
+        self._step_idx = 0
         out = self._env.reset()
         obs, info = self._unwrap_reset(out)
         return self._to_obs(obs, info)
 
     def step(self, action: Action) -> StepResult:
+        self._step_idx += 1
         act = self._to_env_action(action)
         out = self._env.step(act)
         obs, reward, terminated, truncated, info = self._unwrap_step(out)
         info = dict(info or {})
         success = self._extract_success(info)
         info["success"] = success
+
+        # reward/terminated/truncated come back as CUDA tensors; np.asarray on
+        # one raises "can't convert cuda:0 device type tensor to numpy".
+        def _scalar(x, cast, default):
+            if x is None:
+                return default
+            arr = _to_numpy(x)
+            arr = np.asarray(arr).ravel()
+            return cast(arr[0]) if arr.size else default
+
         return StepResult(
             obs=self._to_obs(obs, info),
-            reward=float(np.asarray(reward).ravel()[0]) if reward is not None else 0.0,
-            terminated=bool(np.asarray(terminated).ravel()[0]) if terminated is not None else False,
-            truncated=bool(np.asarray(truncated).ravel()[0]) if truncated is not None else False,
+            reward=_scalar(reward, float, 0.0),
+            terminated=_scalar(terminated, bool, False),
+            truncated=_scalar(truncated, bool, False),
             info=info,
         )
 
@@ -159,11 +179,15 @@ class RoboLabEnv(Env):
         return out, out.get("reward", 0.0), out.get("terminated", out.get("done", False)), out.get("truncated", False), {}
 
     def _to_obs(self, obs, info) -> Obs:
+        # image/proprio are read from the RAW obs: _to_numpy flattens torch
+        # tensors but also loses the group structure these scans rely on.
+        self._last_image = self._extract_image(obs)
+        self._last_proprio = self._extract_proprio(obs)
         o = _to_numpy(obs)
         return Obs(
             state=self._extract_state(o),
-            image=self._extract_image(o),
-            text=self._instruction,
+            image=self._last_image,
+            text=self.get_text_state(),
             info=dict(info or {}),
         )
 
@@ -187,17 +211,78 @@ class RoboLabEnv(Env):
         return self._flatten(obs)
 
     def _extract_image(self, obs):
-        if not isinstance(obs, dict):
+        """Find a camera frame anywhere in the observation.
+
+        RoboLab nests observations in groups (image_obs, proprio_obs,
+        viewport_cam, ...) whose camera terms are named per scene camera --
+        `over_shoulder_left_camera`, `egocentric_mirrored_camera`,
+        `wrist_camera` -- so a fixed key list finds nothing. Scan for any
+        image-shaped tensor instead, preferring a viewport/exterior view.
+        """
+        best = None
+        best_rank = -1
+
+        def visit(node, path=""):
+            nonlocal best, best_rank
+            if node is None:
+                return
+            if hasattr(node, "shape"):
+                shape = tuple(node.shape)
+                # (..., H, W, C) with C in {3, 4} and a plausible frame size
+                if len(shape) >= 3 and shape[-1] in (3, 4) and shape[-2] >= 32 and shape[-3] >= 32:
+                    low = path.lower()
+                    rank = 2 if "viewport" in low else (1 if "wrist" not in low else 0)
+                    if rank > best_rank:
+                        best, best_rank = node, rank
+                return
+            keys = getattr(node, "keys", None)
+            if keys is None:
+                return
+            for k in list(keys()):
+                visit(node[k], f"{path}/{k}")
+
+        visit(obs)
+        if best is None:
             return None
-        for key in ("image", "rgb", "rgb_image"):
-            if key in obs and obs[key] is not None:
-                return _to_numpy(obs[key])
-        policy = obs.get("policy")
-        if isinstance(policy, dict):
-            for key in ("image", "rgb"):
-                if key in policy and policy[key] is not None:
-                    return _to_numpy(policy[key])
-        return None
+
+        arr = _to_numpy(best)
+        while arr.ndim > 3:  # drop the env-batch dimension
+            arr = arr[0]
+        if arr.shape[-1] == 4:
+            arr = arr[..., :3]
+        if arr.dtype != np.uint8:
+            arr = (arr * 255 if float(arr.max() or 0) <= 1.0 else arr)
+            arr = np.clip(arr, 0, 255).astype(np.uint8)
+        return arr
+
+    def _extract_proprio(self, obs) -> dict:
+        """Pull end-effector and joint state out of the observation.
+
+        Without this the agent sees only the instruction string and is acting
+        blind. These terms live under the proprio observation group.
+        """
+        out: dict = {}
+        wanted = ("ee_pos", "ee_quat", "arm_joint_pos", "gripper_pos")
+
+        def visit(node, path=""):
+            if node is None:
+                return
+            if hasattr(node, "shape"):
+                leaf = path.rsplit("/", 1)[-1]
+                if leaf in wanted and leaf not in out:
+                    arr = _to_numpy(node)
+                    while arr.ndim > 1:
+                        arr = arr[0]
+                    out[leaf] = arr
+                return
+            keys = getattr(node, "keys", None)
+            if keys is None:
+                return
+            for k in list(keys()):
+                visit(node[k], f"{path}/{k}")
+
+        visit(obs)
+        return out
 
     def _flatten(self, x):
         x = _to_numpy(x)
@@ -230,18 +315,52 @@ class RoboLabEnv(Env):
             if v.size < dim:
                 v = np.concatenate([v, np.zeros(dim - v.size, dtype=np.float32)])
             v = v[:dim]
-        # Isaac Lab expects a batch: (num_envs, action_dim)
-        return v.reshape(self._num_envs, -1) if self._num_envs > 1 else v
+
+        # Isaac Lab always expects a batched torch tensor on the sim device --
+        # its action manager calls action.to(device), so a numpy array raises
+        # AttributeError before the step ever runs.
+        v = v.reshape(self._num_envs, -1) if self._num_envs > 1 else v.reshape(1, -1)
+        try:
+            import torch
+
+            device = getattr(self._env, "device", None) or "cuda:0"
+            return torch.as_tensor(v, dtype=torch.float32, device=device)
+        except ImportError:  # pragma: no cover - torch ships with Isaac Lab
+            return v
 
     def _extract_success(self, info: dict) -> bool:
         for key in ("success", "is_success", "task_success", "goal_achieved"):
             if key in info:
-                return bool(np.asarray(info[key]).ravel()[0])
+                arr = np.asarray(_to_numpy(info[key])).ravel()
+                if arr.size:
+                    return bool(arr[0])
         return False
 
     # -- text / subgoal --------------------------------------------------- #
     def get_text_state(self) -> str:
-        return self._instruction
+        """Instruction plus whatever proprioception the observation carries.
+
+        Returning the bare instruction leaves the agent blind: identical text
+        every step, no feedback that an action did anything.
+        """
+        lines = [f"Task: {self._instruction}"]
+        p = self._last_proprio or {}
+        if "ee_pos" in p:
+            lines.append("End-effector position: " + _fmt_vec(p["ee_pos"]))
+        if "ee_quat" in p:
+            lines.append("End-effector orientation (w,x,y,z): " + _fmt_vec(p["ee_quat"]))
+        if "arm_joint_pos" in p:
+            lines.append("Arm joint positions (rad): " + _fmt_vec(p["arm_joint_pos"]))
+        if "gripper_pos" in p:
+            g = np.asarray(p["gripper_pos"]).ravel()
+            lines.append(f"Gripper: {_fmt_vec(g)} (higher = more closed)")
+        if self._step_idx:
+            lines.append(f"Step {self._step_idx}.")
+        return "\n".join(lines)
+
+    def get_ee_pos(self):
+        p = (self._last_proprio or {}).get("ee_pos")
+        return None if p is None else np.asarray(p, dtype=np.float32)
 
     def check_subgoal(self, name: str) -> bool:
         # TODO(verify): RoboLab exposes composable success predicates. Map them
@@ -249,7 +368,5 @@ class RoboLabEnv(Env):
         return False
 
     def render(self) -> Optional[np.ndarray]:
-        # TODO(verify): RoboLab records its own videos (enable_cameras/save_videos);
-        # a raw RGB grab may not be available on the gym path. Return None so the
-        # harness text trace still works; episode videos come from RoboLab's recorder.
-        return None
+        """Latest camera frame, cached from the last observation."""
+        return self._last_image
