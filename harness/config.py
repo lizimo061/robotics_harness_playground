@@ -87,6 +87,14 @@ class AgentConfig:
     mode: str = "json"  # json (emit actions) | code (Code-as-Policies) | plan (plan then act)
     max_steps: int = 50
     use_vision: bool = False
+    #: Scaffolding tier. "privileged" hands the agent ground-truth object poses as
+    #: text -- fast, and what every result in this repo was measured with. "perception"
+    #: withdraws those queries and offers detect/point_at instead, so locations must be
+    #: found by looking. The gap between the two on one task is the measurement.
+    tier: str = "privileged"
+    #: detector spec for the perception tier: "oracle", or
+    #: {"type": "oracle", "noise_m": 0.02} / {"type": "remote", "base_url": ...}
+    detector: Any = None
     system_prompt: str = ""  # override the default system prompt
     temperature: Optional[float] = None
     extra: dict[str, Any] = field(default_factory=dict)

@@ -56,6 +56,27 @@ parser.add_argument("--with-null", action="store_true",
                          "process. A task the null agent passes has a vacuous success "
                          "check, and Isaac startup is too expensive to pay twice for it.")
 parser.add_argument("--null-episodes", type=int, default=1)
+parser.add_argument("--task-pack", default="benchmark",
+                    choices=["benchmark", "robovolo"],
+                    help="which task folders to discover. 'robovolo' adds the RoboVoLo "
+                         "content pack (126 tasks over four reasoning suites), which "
+                         "installs separately -- see NVlabs/RoboVoLo")
+parser.add_argument("--allow-missing-pack", action="store_true",
+                    help="fall back to the base task set instead of failing when the "
+                         "requested pack is absent (off by default: a silent fallback "
+                         "would report base-set results under the pack's name)")
+parser.add_argument("--tier", default="privileged", choices=["privileged", "perception"],
+                    help="scaffolding tier: privileged hands over ground-truth object "
+                         "poses; perception withdraws them and offers detect/point_at")
+parser.add_argument("--detector", default="oracle",
+                    help="detector for the perception tier: 'oracle', or a JSON object "
+                         'like {"type":"remote","base_url":"http://localhost:8100"}')
+parser.add_argument("--monitor-every", type=int, default=0,
+                    help="pause a policy rollout every N env steps so the agent can "
+                         "continue/abort it (VoLoAgent's monitor cadence); 0 disables")
+parser.add_argument("--two-clock", action="store_true",
+                    help="read a bounded monitor prompt each turn instead of replaying "
+                         "the whole transcript")
 parser.add_argument("--scripted-map", default="",
                     help="solvability probe, as 'Task:source>target,Task2:src>dst'. "
                          "The probe is TOLD what to move where, which is the point: a "
@@ -91,8 +112,19 @@ def _run_episode(env, raw, task, agent_id, agent_writer, i, kind, *,
     elif kind == "null" or args_cli.scripted:
         agent = get_baseline_agent("null", max_steps=args_cli.max_steps)
     else:
+        detector = None
+        if args_cli.tier != "privileged":
+            import json as _json
+
+            from harness.perception.detect import get_detector
+            spec = args_cli.detector
+            if spec.strip().startswith("{"):
+                spec = _json.loads(spec)
+            detector = get_detector(spec, env)
         agent = LLMController(llm, mode=args_cli.mode, max_steps=args_cli.max_steps,
-                              task_description=instruction)
+                              task_description=instruction,
+                              tier=args_cli.tier, detector=detector,
+                              two_clock=args_cli.two_clock)
     try:
         ep = agent.run(env, seed=i)
     except Exception as e:  # noqa: BLE001 - one bad episode must not end the sweep
@@ -156,7 +188,10 @@ def main() -> None:
     for task in tasks:
         print(f"\n=== {task} ", flush=True)
         try:
-            raw = RoboLabEnv(task, action_mode=args_cli.action_mode, device=args_cli.device)
+            raw = RoboLabEnv(task, action_mode=args_cli.action_mode,
+                             device=args_cli.device,
+                             task_pack=args_cli.task_pack,
+                             require_task_pack=not args_cli.allow_missing_pack)
         except Exception as e:  # noqa: BLE001 - one bad task must not end the sweep
             print(f"!! could not build {task}: {type(e).__name__}: {e}", flush=True)
             failures.append({"task": task, "error": f"{type(e).__name__}: {e}"})

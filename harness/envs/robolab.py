@@ -123,6 +123,14 @@ class RoboLabEnv(Env):
         #: approach sweeps were parameterised in that same wrong space, they
         #: explored a window that could not contain the answer.
         tcp_offset: float = 0.126,
+        #: Which task folders to discover. "benchmark" is RoboLab's own 120 tasks;
+        #: "robovolo" adds the RoboVoLo content pack (126 further tasks over four
+        #: reasoning suites), which ships separately -- see NVlabs/RoboVoLo. RoboLab's
+        #: discovery skips a missing folder SILENTLY, which is the wrong default for an
+        #: evaluation: asking for a pack and quietly getting the base set would
+        #: mislabel every result, so this raises unless explicitly allowed.
+        task_pack: str = "benchmark",
+        require_task_pack: bool = True,
         seed: int = 0,
         **kwargs: Any,
     ) -> None:
@@ -146,6 +154,7 @@ class RoboLabEnv(Env):
         # failing. The IK flavours take Cartesian targets, which is what the
         # move_to / move_delta tools actually mean.
         self._auto_register, suffix = self._registrar_for(action_mode)
+        task_dirs = self._resolve_task_dirs(task_pack, require=require_task_pack)
         # The suffix must be requested explicitly. RoboLab's abs/rel IK
         # registrars document that they append "AbsIK"/"RelIK" to every env name,
         # but they forward a caller-supplied `env_postfix` that defaults to empty
@@ -153,7 +162,10 @@ class RoboLabEnv(Env):
         # each call silently replaces the last (hence RoboLab's own
         # "previous registration will be replaced" warnings). Passing it keeps the
         # flavours distinct, so the name we create is the interface we asked for.
-        self._auto_register(**({"env_postfix": suffix} if suffix else {}))
+        register_kwargs = {"env_postfix": suffix} if suffix else {}
+        if task_dirs is not None:
+            register_kwargs["task_dirs"] = task_dirs
+        self._auto_register(**register_kwargs)
 
         task_name = self._resolve_task(get_envs, task, suffix)
 
@@ -191,6 +203,49 @@ class RoboLabEnv(Env):
         #: solving a task in 68 steps on a fresh env and burning its whole 260-step
         #: budget when it runs after two LLM episodes on the same env.
         self._home_robot: Optional[tuple] = None
+
+    #: task pack -> the folders RoboLab should discover. Mirrors RoboLab's own
+    #: VOLO_TASK_SUBFOLDERS convention (policies/volo/registration.py).
+    _TASK_PACKS = {
+        "benchmark": ["benchmark"],
+        "robovolo": ["benchmark", "robovolo"],
+    }
+
+    @classmethod
+    def _resolve_task_dirs(cls, task_pack: str, *, require: bool = True):
+        """Folders for a task pack, checking that a requested pack is actually there.
+
+        RoboLab skips a missing task folder without comment. For a benchmark run that
+        is dangerous: a sweep asking for RoboVoLo's suites would silently measure the
+        base 120 tasks and report them under the wrong name.
+        """
+        pack = str(task_pack or "benchmark").lower()
+        if pack not in cls._TASK_PACKS:
+            raise ValueError(f"unknown task_pack {pack!r}; "
+                             f"expected one of {sorted(cls._TASK_PACKS)}")
+        dirs = list(cls._TASK_PACKS[pack])
+        missing = [d for d in dirs if not cls._task_dir_exists(d)]
+        if missing:
+            msg = (f"task pack {pack!r} wants folder(s) {missing} which are not "
+                   f"installed. The RoboVoLo content pack ships separately: see "
+                   f"https://github.com/NVlabs/RoboVoLo. Without it the run would "
+                   f"quietly fall back to the base task set.")
+            if require:
+                raise FileNotFoundError(msg)
+            log.warning("%s Continuing with %s.", msg,
+                        [d for d in dirs if d not in missing])
+            dirs = [d for d in dirs if d not in missing]
+        return dirs
+
+    @staticmethod
+    def _task_dir_exists(name: str) -> bool:
+        try:
+            from robolab.constants import TASK_DIR
+        except ImportError:
+            return False
+        from pathlib import Path
+
+        return (Path(TASK_DIR) / name).is_dir()
 
     #: action_mode -> (registration module, function, env-name suffix).
     #: RoboLab registers one env per flavour and distinguishes them by suffix,
