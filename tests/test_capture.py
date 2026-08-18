@@ -151,3 +151,63 @@ class TestBlankFrames(unittest.TestCase):
         env.env.n = 0                          # force render() black again
         env.step(Action(kind="noop"))
         self.assertEqual(len(env.frames), 2)
+
+
+class TestScriptedPickPlace(unittest.TestCase):
+    """The solvability probe for language-goal envs.
+
+    RoboLab states goals in words ("put the cube in the bowl"), so the generic
+    oracle has no coordinate to aim at. Being handed the source and target is the
+    point: it answers whether the task is reachable through this action
+    interface, which a model's 0% cannot answer alone.
+    """
+
+    def test_it_solves_a_tabletop_pick_place_when_told_what_to_move(self):
+        from harness.agent.baselines import get_baseline_agent
+        env = TabletopEnv(task="pick_place")
+        env.reset(seed=0)
+        goal = env.list_goals()[0]
+        agent = get_baseline_agent("scripted_pick_place", source="cube", target=goal,
+                                   max_steps=200)
+        # tabletop is planar; the probe drives 3-D absolute poses, which the env
+        # accepts as (x, y) plus an ignored z
+        ep = agent.run(env, seed=0)
+        self.assertGreater(ep.steps, 0)
+        env.close()
+
+    def test_it_reports_a_missing_object_instead_of_flailing(self):
+        from harness.agent.baselines import get_baseline_agent
+        env = TabletopEnv(task="pick_place")
+        agent = get_baseline_agent("scripted_pick_place", source="nope", target="also_nope")
+        ep = agent.run(env, seed=0)
+        self.assertFalse(ep.success)
+        self.assertIn("cannot locate", ep.metadata.get("error", ""))
+        self.assertEqual(ep.steps, 0)
+        env.close()
+
+    def test_it_commands_the_gripper_on_every_step(self):
+        """A binary gripper action that is not repeated is released by the next
+        command that omits it, so the object would be dropped mid-carry."""
+        from harness.agent.baselines import get_baseline_agent
+        env = TabletopEnv(task="pick_place")
+        env.reset(seed=0)
+        agent = get_baseline_agent("scripted_pick_place", source="cube",
+                                   target=env.list_goals()[0], max_steps=60)
+        ep = agent.run(env, seed=0)
+        self.assertTrue(all(a.gripper is not None for a in ep.actions), "a step omitted the gripper")
+        env.close()
+
+    def test_the_step_budget_is_respected(self):
+        from harness.agent.baselines import get_baseline_agent
+        env = TabletopEnv(task="pick_place")
+        env.reset(seed=0)
+        agent = get_baseline_agent("scripted_pick_place", source="cube",
+                                   target=env.list_goals()[0], max_steps=5)
+        ep = agent.run(env, seed=0)
+        self.assertLessEqual(ep.steps, 5 + 3)  # budget plus one settle group
+        env.close()
+
+    def test_an_unknown_baseline_name_still_raises(self):
+        from harness.agent.baselines import get_baseline_agent
+        with self.assertRaises(KeyError):
+            get_baseline_agent("teleop")

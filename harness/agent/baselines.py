@@ -250,6 +250,142 @@ class OracleAgent(Agent):
         return ep
 
 
+class ScriptedPickPlaceAgent(Agent):
+    """Told which object to move where, then executes a fixed 3-D pick-and-place.
+
+    This is the solvability probe for envs whose goals are stated in language
+    rather than as coordinates -- RoboLab says "put the cube in the bowl", so the
+    generic OracleAgent (which reads ``list_goals``) has nothing to aim at. Being
+    *given* the source and target is the point: it answers "can this task be
+    solved through this action interface at all?", which is the question a 0%
+    model score cannot answer on its own. A task this fails is not evidence about
+    any model.
+
+    Written against the env's query API and absolute end-effector moves, so it
+    works anywhere both exist.
+    """
+
+    name = "scripted_pick_place"
+
+    def __init__(self, *, source: str = "", target: str = "", max_steps: int = 120,
+                 hover: float = 0.12, tol: float = 0.02, settle: int = 3,
+                 phase_budget: int = 14, **kwargs) -> None:
+        self._source = source
+        self._target = target
+        self._max_steps = int(max_steps)
+        self._hover = float(hover)       # approach height above an object
+        self._tol = float(tol)           # position tolerance before advancing
+        self._settle = int(settle)       # steps to hold after a gripper change
+        self._phase_budget = int(phase_budget)
+
+    def _pos(self, env: Env, name: str):
+        """Locate a named thing, whether the env calls it an object or a goal.
+
+        RoboLab's containers are scene objects ("the bowl"); tabletop's targets
+        are goals with coordinates. Accepting both keeps one probe for both.
+        """
+        for attr in ("get_object_pos", "get_goal_pos"):
+            getter = getattr(env, attr, None)
+            if getter is None:
+                continue
+            try:
+                p = getter(name)
+            except Exception:  # noqa: BLE001 - unknown name for this getter
+                continue
+            if p is not None:
+                return np.asarray(p, dtype=np.float32).ravel()[:3]
+        return None
+
+    @staticmethod
+    def _as3(p):
+        """Pad to three dimensions so the waypoint arithmetic is uniform.
+
+        Planar envs report (x, y); the hover offset then has nothing to act on,
+        which is correct rather than special-cased.
+        """
+        a = np.zeros(3, dtype=np.float32)
+        a[:min(3, len(p))] = p[:3]
+        return a
+
+    def run(self, env: Env, *, seed: Optional[int] = None) -> Episode:  # noqa: C901
+        ep = Episode(metadata={"mode": "scripted", "agent": self.name, "env": env.name,
+                               "source": self._source, "target": self._target})
+        obs = env.reset(seed=seed)
+        ep.observations.append(obs)
+
+        src_native = self._pos(env, self._source)
+        dst_native = self._pos(env, self._target)
+        src = None if src_native is None else self._as3(src_native)
+        dst = None if dst_native is None else self._as3(dst_native)
+        if src is None or dst is None:
+            ep.metadata["error"] = (
+                f"cannot locate source {self._source!r} or target {self._target!r}; "
+                f"available: {getattr(env, 'list_objects', lambda: [])()}")
+            ep.success = False
+            ep.metadata["steps"] = 0
+            return ep
+
+        # emit actions in the env's own dimensionality: a planar env expects (x, y)
+        dim = int(len(src_native))
+        up = np.array([0.0, 0.0, self._hover], dtype=np.float32)
+        # (target position, gripper) -- the gripper is commanded on every step,
+        # because a binary gripper action that is not repeated is released by the
+        # next command that omits it.
+        waypoints = [
+            (src + up, 0.0),   # hover over the object, open
+            (src, 0.0),        # descend onto it
+            (src, 1.0),        # close
+            (src + up, 1.0),   # lift it clear
+            (dst + up, 1.0),   # carry it over the target
+            (dst + up * 0.4, 1.0),  # lower toward the target
+            (dst + up * 0.4, 0.0),  # release
+        ]
+
+        done = False
+        for point, grip in waypoints:
+            if done:
+                break
+            for _ in range(self._phase_budget):
+                if ep.steps >= self._max_steps:
+                    break
+                action = Action(kind="ee_pose",
+                                value=np.asarray(point, dtype=np.float32)[:dim],
+                                gripper=grip, comment=f"scripted -> {point.round(3)}")
+                result = env.step(action)
+                ep.actions.append(action)
+                ep.rewards.append(result.reward)
+                ep.infos.append(result.info)
+                ep.observations.append(result.obs)
+                if result.success or result.terminated or result.truncated:
+                    done = True
+                    break
+                ee = getattr(env, "get_ee_pos", lambda: None)()
+                if ee is not None:
+                    ee = self._as3(np.asarray(ee, dtype=np.float32).ravel())
+                    if float(np.linalg.norm(ee[:dim] - point[:dim])) <= self._tol:
+                        break
+            # hold after a gripper transition so the physics can settle
+            for _ in range(self._settle if grip in (0.0, 1.0) else 0):
+                if done or ep.steps >= self._max_steps:
+                    break
+                action = Action(kind="ee_pose",
+                                value=np.asarray(point, dtype=np.float32)[:dim],
+                                gripper=grip, comment="settle")
+                result = env.step(action)
+                ep.actions.append(action)
+                ep.rewards.append(result.reward)
+                ep.infos.append(result.info)
+                ep.observations.append(result.obs)
+                if result.success or result.terminated or result.truncated:
+                    done = True
+
+        ep.success = bool(ep.infos and ep.infos[-1].get("success", False)) or bool(
+            getattr(env, "is_success", lambda: False)())
+        ep.total_reward = sum(ep.rewards)
+        ep.metadata["steps"] = ep.steps
+        return ep
+
+
 def get_baseline_agent(name: str, **kwargs) -> Agent:
     """Factory for the reference agents."""
     key = (name or "").strip().lower()
@@ -257,4 +393,7 @@ def get_baseline_agent(name: str, **kwargs) -> Agent:
         return OracleAgent(**kwargs)
     if key in ("null", "null_agent", "nop", "noop"):
         return NullAgent(**kwargs)
-    raise KeyError(f"Unknown baseline agent '{name}'. Use 'oracle' or 'null'.")
+    if key in ("scripted_pick_place", "pick_place", "scripted"):
+        return ScriptedPickPlaceAgent(**kwargs)
+    raise KeyError(
+        f"Unknown baseline agent '{name}'. Use 'oracle', 'null' or 'scripted_pick_place'.")

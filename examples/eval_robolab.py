@@ -51,6 +51,12 @@ parser.add_argument("--with-null", action="store_true",
                          "process. A task the null agent passes has a vacuous success "
                          "check, and Isaac startup is too expensive to pay twice for it.")
 parser.add_argument("--null-episodes", type=int, default=1)
+parser.add_argument("--scripted-map", default="",
+                    help="solvability probe, as 'Task:source>target,Task2:src>dst'. "
+                         "The probe is TOLD what to move where, which is the point: a "
+                         "task it cannot solve is not evidence about any model, and "
+                         "RoboLab states goals in language so a generic oracle has "
+                         "nothing to aim at.")
 args_cli, _ = parser.parse_known_args()
 args_cli.enable_cameras = True  # required for camera observations
 app_launcher = AppLauncher(args_cli)
@@ -68,13 +74,16 @@ from harness.viz.capture import FrameCapture  # noqa: E402
 from harness.viz.video import write_video  # noqa: E402
 
 
-def _run_episode(env, raw, task, agent_id, agent_writer, i, is_null, *,
-                 llm, instruction, vid_dir) -> list:
+def _run_episode(env, raw, task, agent_id, agent_writer, i, kind, *,
+                 llm, instruction, vid_dir, move=None) -> list:
     """Run one episode, append its record, write its video. Returns manifest rows."""
     env.clear()
     t0 = time.time()
     err = None
-    if is_null or args_cli.scripted:
+    if kind == "scripted" and move:
+        agent = get_baseline_agent("scripted_pick_place", source=move[0],
+                                   target=move[1], max_steps=140)
+    elif kind == "null" or args_cli.scripted:
         agent = get_baseline_agent("null", max_steps=args_cli.max_steps)
     else:
         agent = LLMController(llm, mode=args_cli.mode, max_steps=args_cli.max_steps,
@@ -97,10 +106,13 @@ def _run_episode(env, raw, task, agent_id, agent_writer, i, is_null, *,
     outcome = "success" if ep.success else "fail"
     print(f"  [{agent_id}] ep{i}: success={ep.success} steps={ep.steps} "
           f"frames={len(env.frames)} {time.time() - t0:.0f}s", flush=True)
+    if ep.metadata.get("error"):
+        print(f"  !! {ep.metadata['error']}", flush=True)
     if not env.frames:
         print("  !! no frames captured (camera off, or render() is None)", flush=True)
         return []
-    stem = f"{task}_null_{outcome}" if is_null else f"{task}_ep{i}_{outcome}"
+    stem = (f"{task}_ep{i}_{outcome}" if kind == "llm"
+            else f"{task}_{kind}_{outcome}")
     path = vid_dir / f"{stem}.mp4"
     try:
         write_video(env.frames, path, fps=args_cli.fps)
@@ -122,6 +134,15 @@ def main() -> None:
     writer = ResultsWriter(out / model_id)
     writer.write_config(vars(args_cli) | {"tasks": tasks})
     null_writer = ResultsWriter(out / "null") if args_cli.with_null else None
+
+    # "Task:source>target,..." -> {task: (source, target)}
+    scripted_map = {}
+    for entry in (e.strip() for e in args_cli.scripted_map.split(",") if e.strip()):
+        task_part, _, move = entry.partition(":")
+        source, _, target = move.partition(">")
+        if task_part and source and target:
+            scripted_map[task_part.strip()] = (source.strip(), target.strip())
+    scripted_writer = ResultsWriter(out / "scripted") if scripted_map else None
 
     llm = None if args_cli.scripted else get_llm(
         LLMConfig(provider=args_cli.provider, model=args_cli.model, max_tokens=1024))
@@ -154,16 +175,19 @@ def main() -> None:
                   + env.get_text_state().replace("\n", "\n    "), flush=True)
         # (agent_id, writer, episodes, is_null) -- the null baseline shares this
         # task's env, so it costs no extra Isaac startup.
-        plans = [(model_id, writer, args_cli.episodes, False)]
+        plans = [(model_id, writer, args_cli.episodes, "llm")]
         if null_writer is not None:
-            plans.append(("null", null_writer, args_cli.null_episodes, True))
+            plans.append(("null", null_writer, args_cli.null_episodes, "null"))
+        if scripted_writer is not None and task in scripted_map:
+            plans.append(("scripted", scripted_writer, 1, "scripted"))
 
         try:
-            for agent_id, agent_writer, n_eps, is_null in plans:
+            for agent_id, agent_writer, n_eps, kind in plans:
                 for i in range(n_eps):
                     manifest.extend(_run_episode(
-                        env, raw, task, agent_id, agent_writer, i, is_null,
-                        llm=llm, instruction=instruction, vid_dir=vid_dir))
+                        env, raw, task, agent_id, agent_writer, i, kind,
+                        llm=llm, instruction=instruction, vid_dir=vid_dir,
+                        move=scripted_map.get(task)))
         finally:
             env.close()
 
