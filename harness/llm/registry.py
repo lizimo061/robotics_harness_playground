@@ -28,6 +28,14 @@ def get_llm(cfg: LLMConfig) -> LLMClient:
 
         return MockLLMClient(model=cfg.model or "mock", extra=cfg.extra)
 
+    # Local `claude` CLI instead of the paid HTTP API. Kept strictly separate
+    # from the "claude"/"anthropic" branch below: this one is a no-spend
+    # testing backend, not a substitute for the Messages API.
+    if provider in ("claude_code", "claude-code", "cli"):
+        from harness.llm.claude_code import ClaudeCodeClient
+
+        return ClaudeCodeClient(model=cfg.model, timeout=cfg.timeout, extra=cfg.extra)
+
     if provider in ("claude", "anthropic"):
         from harness.llm.anthropic import AnthropicClient
 
