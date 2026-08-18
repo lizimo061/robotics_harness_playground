@@ -347,6 +347,13 @@ class RoboLabEnv(Env):
                 delta = np.zeros(3, dtype=np.float32)
                 delta[:n] = target[:n] - cur[:n]
                 v = self._clip_delta(delta, dim)
+                # Saturation is invisible to the agent otherwise: it asks to move
+                # to a target, the arm moves 5cm, and nothing says why. Recording
+                # it lets get_text_state() tell the agent to keep going, which
+                # turns a dead end into an iterable control loop.
+                remaining = float(np.linalg.norm(delta[:n] - v[:n]))
+                self._last_move_clipped = remaining > 1e-4
+                self._last_move_remaining = remaining
         if action.gripper is not None:
             v = v.copy()
             if v.size >= 1:
@@ -481,6 +488,11 @@ class RoboLabEnv(Env):
         if "gripper_pos" in p:
             g = np.asarray(p["gripper_pos"]).ravel()
             lines.append(f"Gripper: {_fmt_vec(g)} (higher = more closed)")
+        if getattr(self, "_last_move_clipped", False):
+            lines.append(
+                f"The last move was capped at this environment's per-step limit; "
+                f"{self._last_move_remaining:.3f} m of it remains. Repeat the move "
+                f"to keep approaching the target.")
         if self._step_idx:
             lines.append(f"Step {self._step_idx}.")
         return "\n".join(lines)

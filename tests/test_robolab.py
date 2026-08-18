@@ -49,6 +49,8 @@ def _env_for_action_tests(ee=(0.30, 0.00, 0.20)):
     env._num_envs = 1
     env._action_mode = "ee_delta"
     env._last_proprio = {"ee_pos": np.asarray(ee, dtype=np.float32)}
+    env._instruction = "test instruction"
+    env._step_idx = 0
     return env
 
 
@@ -118,3 +120,21 @@ class TestActionConversion(unittest.TestCase):
         import numpy as np
         clipped = env._clip_delta(np.asarray([10.0, -10.0, 10.0], dtype=np.float32), 4)
         self.assertTrue(all(abs(float(c)) <= 0.05 + 1e-6 for c in clipped))
+
+
+class TestClippingFeedback(unittest.TestCase):
+    """Saturation the agent cannot observe is a dead end, not a control loop."""
+
+    def test_a_capped_move_is_reported_in_the_text_state(self):
+        from harness.types import Action
+        env = _env_for_action_tests(ee=(0.30, 0.0, 0.20))
+        env._to_env_action(Action(kind="ee_pose", value=[0.90, 0.0, 0.20]))
+        text = env.get_text_state()
+        self.assertIn("per-step limit", text)
+        self.assertIn("remains", text)
+
+    def test_a_move_within_the_limit_reports_nothing(self):
+        from harness.types import Action
+        env = _env_for_action_tests(ee=(0.30, 0.0, 0.20))
+        env._to_env_action(Action(kind="ee_pose", value=[0.31, 0.0, 0.20]))
+        self.assertNotIn("per-step limit", env.get_text_state())
