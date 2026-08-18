@@ -65,6 +65,9 @@ def _env_for_action_tests(ee=(0.30, 0.00, 0.20), mode="ee_delta", space=None,
                          "ee_quat": np.asarray(quat, dtype=np.float32)}
     env._instruction = "test instruction"
     env._step_idx = 0
+    # zero by default so each test below isolates one behaviour; the
+    # tool-centre-point conversion has its own class.
+    env._tcp_offset = 0.0
     return env
 
 
@@ -255,3 +258,56 @@ class TestClippingFeedback(unittest.TestCase):
         env = _env_for_action_tests(ee=(0.30, 0.0, 0.20))
         env._to_env_action(Action(kind="ee_pose", value=[0.31, 0.0, 0.20]))
         self.assertNotIn("per-step limit", env.get_text_state())
+
+
+class TestToolCentrePoint(unittest.TestCase):
+    """The IK drives the gripper flange; the fingertips are 162.8mm below it.
+
+    Commanding a grasp at an object's own z therefore drives the fingers through
+    the table, the IK saturates against it, and nothing is ever picked up -- with
+    no error anywhere. Tool coordinates are fingertip space; the adapter converts.
+    """
+
+    def _env(self, **kw):
+        env = _env_for_action_tests(mode="ee_pose", space=_FakeAbsSpace(), **kw)
+        env._tcp_offset = 0.1628
+        return env
+
+    def test_a_grasp_target_is_raised_to_the_flange(self):
+        import numpy as np
+
+        from harness.types import Action
+        env = self._env(ee=(0.30, 0.0, 0.40))
+        out = np.asarray(env._to_env_action(
+            Action(kind="ee_pose", value=[0.43, -0.10, 0.034]))).ravel()
+        self.assertAlmostEqual(float(out[2]), 0.034 + 0.1628, places=4)
+        self.assertAlmostEqual(float(out[0]), 0.43, places=5)  # x, y unaffected
+
+    def test_the_reported_pose_is_the_fingertip(self):
+        import numpy as np
+        env = self._env(ee=(0.30, 0.0, 0.40))
+        tip = np.asarray(env.get_ee_pos()).ravel()
+        self.assertAlmostEqual(float(tip[2]), 0.40 - 0.1628, places=4)
+        flange = np.asarray(env.get_flange_pos()).ravel()
+        self.assertAlmostEqual(float(flange[2]), 0.40, places=5)
+
+    def test_commands_and_feedback_share_one_frame(self):
+        """Aim at where you already are; the command must be a no-op in z."""
+        import numpy as np
+
+        from harness.types import Action
+        env = self._env(ee=(0.30, 0.0, 0.40))
+        here = np.asarray(env.get_ee_pos()).ravel()
+        out = np.asarray(env._to_env_action(
+            Action(kind="ee_pose", value=here))).ravel()
+        self.assertAlmostEqual(float(out[2]), 0.40, places=4)
+
+    def test_a_zero_offset_disables_the_conversion(self):
+        import numpy as np
+
+        from harness.types import Action
+        env = self._env(ee=(0.30, 0.0, 0.40))
+        env._tcp_offset = 0.0
+        out = np.asarray(env._to_env_action(
+            Action(kind="ee_pose", value=[0.43, 0.0, 0.034]))).ravel()
+        self.assertAlmostEqual(float(out[2]), 0.034, places=5)

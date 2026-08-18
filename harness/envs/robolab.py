@@ -56,6 +56,15 @@ class RoboLabEnv(Env):
         use_fabric: bool = False,
         headless: bool = True,
         action_mode: str = "ee_pose",  # "ee_pose" (abs IK) | "ee_delta" (rel IK) | "joint_position"
+        #: Distance from the controlled body to the fingertips, in metres.
+        #: RoboLab's IK drives the gripper's BASE FLANGE (body_offset is left
+        #: commented out in DroidIKActionCfg) and the Robotiq 2F-85 fingertips are
+        #: 162.8mm below it, per the spec figure RoboLab cites. Commanding a
+        #: grasp at an object's own z therefore drives the fingers ~16cm through
+        #: the table: the IK saturates against it and nothing is ever picked up.
+        #: The adapter treats tool coordinates as fingertip space and converts, so
+        #: "move to the cube" means the fingers, not the flange.
+        tcp_offset: float = 0.1628,
         seed: int = 0,
         **kwargs: Any,
     ) -> None:
@@ -96,6 +105,7 @@ class RoboLabEnv(Env):
         self.task = task_name
         self._instruction = str(getattr(self._env_cfg, "instruction", task_name) or task_name)
         self._action_mode = action_mode
+        self._tcp_offset = float(tcp_offset)
         self._seed = seed
         self._use_fabric = use_fabric
         self._num_envs = num_envs
@@ -431,7 +441,10 @@ class RoboLabEnv(Env):
                 target[:min(3, v.size)] += v[:min(3, v.size)]
             else:
                 target = cur  # hold position (e.g. a pure gripper command)
-            out = np.concatenate([target, self._current_quat()])
+            # the agent aims the fingertips; the IK steers the flange above them
+            flange = target.copy()
+            flange[2] += self._tcp_offset
+            out = np.concatenate([flange, self._current_quat()])
         elif self._action_mode == "ee_delta":
             delta = np.zeros(3, dtype=np.float32)
             if absolute and v.size >= 2:
@@ -607,8 +620,25 @@ class RoboLabEnv(Env):
         return "\n".join(lines)
 
     def get_ee_pos(self):
+        """Fingertip position, not the controlled flange.
+
+        The agent compares this against object positions and aims at them, so it
+        must be expressed in the same space its move commands are interpreted in.
+        Reporting the flange while accepting fingertip targets would put a fixed
+        16cm error in every comparison the agent makes.
+        """
         p = (self._last_proprio or {}).get("ee_pos")
-        return None if p is None else np.asarray(p, dtype=np.float32)
+        if p is None:
+            return None
+        arr = np.asarray(_to_numpy(p), dtype=np.float32).ravel().copy()
+        if arr.size >= 3:
+            arr[2] -= self._tcp_offset
+        return arr
+
+    def get_flange_pos(self):
+        """The body the IK actually controls -- exposed for debugging."""
+        p = (self._last_proprio or {}).get("ee_pos")
+        return None if p is None else np.asarray(_to_numpy(p), dtype=np.float32).ravel()
 
     def check_subgoal(self, name: str) -> bool:
         # TODO(verify): RoboLab exposes composable success predicates. Map them
