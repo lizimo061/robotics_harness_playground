@@ -54,6 +54,33 @@ class TestTokenUsage(unittest.TestCase):
         })
         self.assertEqual(u.cache_read_tokens, 64)
 
+    def test_real_deepseek_payload(self):
+        """Captured verbatim from a live deepseek-v4-flash response.
+
+        Note it carries BOTH prompt_tokens_details.cached_tokens and the
+        prompt_cache_{hit,miss}_tokens pair.
+        """
+        raw = {
+            "prompt_tokens": 13, "completion_tokens": 1, "total_tokens": 14,
+            "prompt_tokens_details": {"cached_tokens": 0},
+            "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 13,
+        }
+        u = TokenUsage.from_raw(raw)
+        self.assertEqual(u.input_tokens, 13)
+        self.assertEqual(u.output_tokens, 1)
+        self.assertEqual(u.total, raw["total_tokens"])
+
+    def test_deepseek_cache_hits_are_not_double_counted(self):
+        # prompt_tokens is the SUM of hit + miss; counting both would bill the
+        # cached half again at the full input rate.
+        u = TokenUsage.from_raw({
+            "prompt_tokens": 1000, "completion_tokens": 50,
+            "prompt_cache_hit_tokens": 960, "prompt_cache_miss_tokens": 40,
+        })
+        self.assertEqual(u.input_tokens, 40)
+        self.assertEqual(u.cache_read_tokens, 960)
+        self.assertEqual(u.input_tokens + u.cache_read_tokens, 1000)
+
     def test_empty_and_none_are_zero(self):
         self.assertEqual(TokenUsage.from_raw(None).total, 0)
         self.assertEqual(TokenUsage.from_raw({}).total, 0)
@@ -78,6 +105,20 @@ class TestCost(unittest.TestCase):
 
     def test_unknown_price_returns_none_not_zero(self):
         self.assertIsNone(estimate_cost("some-self-hosted-llama", {"input_tokens": 1000}))
+
+    def test_vendor_cache_rate_beats_the_generic_multiplier(self):
+        # DeepSeek discounts cached reads ~31x, not Anthropic's ~10x. Using the
+        # generic multiplier here would overcharge cached tokens ~3x.
+        cached = estimate_cost("deepseek-v4-flash", {"prompt_cache_hit_tokens": 1_000_000,
+                                                    "prompt_cache_miss_tokens": 0})
+        self.assertAlmostEqual(cached, 0.014, places=6)
+        fresh = estimate_cost("deepseek-v4-flash", {"input_tokens": 1_000_000})
+        self.assertAlmostEqual(fresh, 0.44, places=6)
+
+    def test_priced_from_response_model_not_request_alias(self):
+        # deepseek-chat is unpriced; the served model it resolves to is priced.
+        self.assertIsNone(estimate_cost("deepseek-chat", {"input_tokens": 1000}))
+        self.assertIsNotNone(estimate_cost("deepseek-v4-flash", {"input_tokens": 1000}))
 
 
 class TestAnthropicPayload(unittest.TestCase):

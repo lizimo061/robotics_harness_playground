@@ -31,6 +31,9 @@ class ModelCaps:
     thinking:        "none" | "adaptive" | "budget"
     effort:          whether output_config.effort is supported.
     price_in/out:    USD per 1M tokens; None means "unknown, do not guess".
+    price_cache_read: USD per 1M cached-read tokens. Providers differ sharply
+        here -- Anthropic discounts ~10x, DeepSeek ~31x -- so a single global
+        multiplier misprices badly. Falls back to _CACHE_READ_MULT when unset.
     """
 
     sampling_params: bool = True
@@ -40,6 +43,7 @@ class ModelCaps:
     context: int = 200_000
     price_in: Optional[float] = None
     price_out: Optional[float] = None
+    price_cache_read: Optional[float] = None
 
 
 # Anthropic, verified against the published model table.
@@ -83,11 +87,35 @@ _ANTHROPIC: dict[str, ModelCaps] = {
     ),
 }
 
-# Non-Anthropic models: request shape only. Prices are deliberately absent --
-# fill them in from each vendor's own pricing page before reporting cost.
+# DeepSeek, from the vendor's published pricing table.
+#
+# Two things make these prices awkward, and both are handled by recording the
+# PEAK rate: off-peak is exactly half of peak (peak = 01:00-04:00 and
+# 06:00-10:00 UTC), and cached input is ~31x cheaper than fresh input rather
+# than Anthropic's ~10x. Peak is the conservative choice -- for a cost
+# comparison, overstating is far safer than understating, and an off-peak run
+# simply comes in under the reported figure.
+_DEEPSEEK: dict[str, ModelCaps] = {
+    "deepseek-v4-pro": ModelCaps(
+        max_output=384_000, context=1_000_000,
+        price_in=1.32, price_out=3.96, price_cache_read=0.044,
+    ),
+    "deepseek-v4-flash": ModelCaps(
+        max_output=384_000, context=1_000_000,
+        price_in=0.44, price_out=1.32, price_cache_read=0.014,
+    ),
+}
+
+# Alias names. `deepseek-chat` was observed resolving to deepseek-v4-flash
+# against the live API (the response's `model` field), so its limits are set
+# to the served model's rather than the stale 64K/8K of an older generation.
+#
+# Prices stay None deliberately: an alias can be repointed server-side at any
+# time, and estimate_cost() prices the model named in the *response*, so a
+# served v4 model is billed correctly without trusting the alias.
 _OTHER: dict[str, ModelCaps] = {
-    "deepseek-chat": ModelCaps(max_output=8192, context=64_000),
-    "deepseek-reasoner": ModelCaps(max_output=8192, context=64_000),
+    "deepseek-chat": ModelCaps(max_output=384_000, context=1_000_000),
+    "deepseek-reasoner": ModelCaps(max_output=384_000, context=1_000_000),
 }
 
 _DEFAULT = ModelCaps()
@@ -102,7 +130,7 @@ def get_caps(model: str) -> ModelCaps:
     name = (model or "").strip().lower()
     if not name:
         return _DEFAULT
-    table = {**_ANTHROPIC, **_OTHER}
+    table = {**_ANTHROPIC, **_DEEPSEEK, **_OTHER}
     if name in table:
         return table[name]
     matches = [k for k in table if name.startswith(k)]
@@ -163,8 +191,19 @@ class TokenUsage:
             if isinstance(details, dict):
                 cached = int(details.get("cached_tokens") or 0)
 
+        fresh = _i("input_tokens", "prompt_tokens")
+
+        # DeepSeek splits the prompt into its own hit/miss fields, and
+        # prompt_tokens is their SUM -- counting both would double-bill the
+        # cached half at the full input rate. Prefer the explicit miss count.
+        if "prompt_cache_hit_tokens" in usage or "prompt_cache_miss_tokens" in usage:
+            cached = cached or _i("prompt_cache_hit_tokens")
+            miss = _i("prompt_cache_miss_tokens")
+            if miss or cached:
+                fresh = miss
+
         return cls(
-            input_tokens=_i("input_tokens", "prompt_tokens"),
+            input_tokens=fresh,
             output_tokens=_i("output_tokens", "completion_tokens"),
             cache_read_tokens=cached,
             cache_write_tokens=_i("cache_creation_input_tokens"),
@@ -184,9 +223,14 @@ def estimate_cost(model: str, usage: Any) -> Optional[float]:
     u = usage if isinstance(usage, TokenUsage) else TokenUsage.from_raw(usage)
     per_token_in = caps.price_in / 1_000_000
     per_token_out = caps.price_out / 1_000_000
+    # Prefer the vendor's own cached-read rate; the multiplier is a fallback.
+    if caps.price_cache_read is not None:
+        per_token_cached = caps.price_cache_read / 1_000_000
+    else:
+        per_token_cached = per_token_in * _CACHE_READ_MULT
     return (
         u.input_tokens * per_token_in
         + u.output_tokens * per_token_out
-        + u.cache_read_tokens * per_token_in * _CACHE_READ_MULT
+        + u.cache_read_tokens * per_token_cached
         + u.cache_write_tokens * per_token_in * _CACHE_WRITE_MULT
     )
