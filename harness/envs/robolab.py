@@ -323,10 +323,18 @@ class RoboLabEnv(Env):
         viewport_cam, ...) whose camera terms are named per scene camera --
         `over_shoulder_left_camera`, `egocentric_mirrored_camera`,
         `wrist_camera` -- so a fixed key list finds nothing. Scan for any
-        image-shaped tensor instead, preferring a viewport/exterior view.
+        image-shaped tensor instead, and rank the views.
+
+        The ranking is what makes a video worth watching: RoboLab documents the
+        mirrored/egocentric third-person camera as the one intended for video
+        recording, an over-shoulder view usually frames the arm, and the wrist
+        camera moves *with* the gripper -- so a wrist recording shows the scene
+        sliding around with the robot itself never in shot, which is exactly the
+        footage you cannot judge a manipulation attempt from.
         """
         best = None
         best_rank = -1
+        best_path = ""
 
         def visit(node, path=""):
             nonlocal best, best_rank
@@ -337,9 +345,18 @@ class RoboLabEnv(Env):
                 # (..., H, W, C) with C in {3, 4} and a plausible frame size
                 if len(shape) >= 3 and shape[-1] in (3, 4) and shape[-2] >= 32 and shape[-3] >= 32:
                     low = path.lower()
-                    rank = 2 if "viewport" in low else (1 if "wrist" not in low else 0)
+                    if "viewport" in low:
+                        rank = 4
+                    elif "mirror" in low or "egocentric" in low or "third" in low:
+                        rank = 3
+                    elif "shoulder" in low or "head" in low or "front" in low:
+                        rank = 2
+                    elif "wrist" in low:
+                        rank = 0  # moves with the gripper; the robot is never in it
+                    else:
+                        rank = 1
                     if rank > best_rank:
-                        best, best_rank = node, rank
+                        best, best_rank, best_path = node, rank, path
                 return
             keys = getattr(node, "keys", None)
             if keys is None:
@@ -350,6 +367,9 @@ class RoboLabEnv(Env):
         visit(obs)
         if best is None:
             return None
+        if best_path != getattr(self, "_image_source", None):
+            self._image_source = best_path
+            log.info("rendering from camera %s (rank %d)", best_path, best_rank)
 
         arr = _to_numpy(best)
         while arr.ndim > 3:  # drop the env-batch dimension

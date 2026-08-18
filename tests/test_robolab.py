@@ -402,3 +402,46 @@ class TestOrientationControl(unittest.TestCase):
         down = env.grasp_orientation()
         approach = r._rotate_by_quat([0.0, 0.0, 1.0], down)
         self.assertAlmostEqual(float(approach[2]), -1.0, places=4)
+
+
+class TestCameraChoice(unittest.TestCase):
+    """A wrist recording shows the scene sliding past with the robot never in it.
+
+    RoboLab documents the mirrored/egocentric camera as the one intended for video
+    recording, so the extractor ranks views rather than taking the first it finds:
+    footage that never images the arm cannot support any claim about what the arm
+    did.
+    """
+
+    def _obs(self, *names):
+        import numpy as np
+        # distinct fill per camera so we can tell which one was picked
+        return {n: np.full((40, 40, 3), i + 1, dtype=np.uint8)
+                for i, n in enumerate(names)}
+
+    def _pick(self, obs):
+        env = _env_for_action_tests()
+        env._image_source = None
+        return env._extract_image(obs)
+
+    def test_the_recording_view_beats_an_over_shoulder_view(self):
+        obs = self._obs("over_shoulder_left_camera", "egocentric_mirrored_camera")
+        self.assertEqual(int(self._pick(obs)[0, 0, 0]), 2)
+
+    def test_any_scene_view_beats_the_wrist_camera(self):
+        obs = self._obs("wrist_camera", "over_shoulder_left_camera")
+        self.assertEqual(int(self._pick(obs)[0, 0, 0]), 2)
+
+    def test_the_wrist_camera_is_used_when_it_is_all_there_is(self):
+        obs = self._obs("wrist_camera")
+        self.assertIsNotNone(self._pick(obs))
+
+    def test_a_viewport_wins_outright(self):
+        obs = self._obs("egocentric_mirrored_camera", "viewport_cam")
+        self.assertEqual(int(self._pick(obs)[0, 0, 0]), 2)
+
+    def test_non_image_tensors_are_ignored(self):
+        import numpy as np
+        obs = {"proprio": np.zeros((7,), dtype=np.float32),
+               "over_shoulder_left_camera": np.full((40, 40, 3), 9, dtype=np.uint8)}
+        self.assertEqual(int(self._pick(obs)[0, 0, 0]), 9)
