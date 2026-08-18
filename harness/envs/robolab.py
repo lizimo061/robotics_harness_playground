@@ -132,6 +132,13 @@ class RoboLabEnv(Env):
         self._last_image = None
         self._last_proprio: dict = {}
         self._step_idx = 0
+        #: Commanded orientation, held as a SETPOINT rather than read back from
+        #: the measurement each step. IsaacLab's differential IK tracks position
+        #: cleanly but drifts in orientation (RoboLab's own DroidIKActionCfg
+        #: docstring says so), and echoing the drifted measurement back as the
+        #: next command compounds it -- measured here going from (0.707,0,0.707,0)
+        #: at reset to (-0.81,-0.08,-0.57,0.10) after a few dozen steps.
+        self._quat_setpoint: Optional[np.ndarray] = None
 
     #: action_mode -> (registration module, function, env-name suffix).
     #: RoboLab registers one env per flavour and distinguishes them by suffix,
@@ -217,6 +224,7 @@ class RoboLabEnv(Env):
     # -- lifecycle -------------------------------------------------------- #
     def reset(self, *, seed: Optional[int] = None) -> Obs:
         self._step_idx = 0
+        self._quat_setpoint = None  # re-seeded from the fresh pose below
         out = self._env.reset()
         obs, info = self._unwrap_reset(out)
         return self._to_obs(obs, info)
@@ -448,6 +456,15 @@ class RoboLabEnv(Env):
              else np.asarray(v, dtype=np.float32).ravel())
         absolute = action.kind in ("ee_pose", "pose", "absolute")
         relative = action.kind in ("ee_delta", "delta", "move")
+        # A 7-vector carries the orientation the caller wants: (x,y,z,qw,qx,qy,qz).
+        # Without a way to command it, a grasp is impossible -- the wrist keeps
+        # whatever orientation it started in.
+        if v.size >= 7:
+            q = np.asarray(v[3:7], dtype=np.float32)
+            n = float(np.linalg.norm(q))
+            if n > 1e-6:
+                self._quat_setpoint = q / n
+            v = v[:3]
 
         if self._action_mode == "ee_pose":
             cur = self.get_ee_pos()
@@ -465,7 +482,7 @@ class RoboLabEnv(Env):
             # gripper's own offset in whatever direction the wrist is pointing
             flange = target.copy()
             flange[:3] = flange[:3] - self._tcp_vector()
-            out = np.concatenate([flange, self._current_quat()])
+            out = np.concatenate([flange, self._target_quat()])
         elif self._action_mode == "ee_delta":
             delta = np.zeros(3, dtype=np.float32)
             if absolute and v.size >= 2:
@@ -656,6 +673,23 @@ class RoboLabEnv(Env):
             arr[:3] = arr[:3] + self._tcp_vector()
         return arr
 
+    def _target_quat(self) -> np.ndarray:
+        """The orientation to command: the setpoint, seeded once from the pose."""
+        if self._quat_setpoint is None:
+            self._quat_setpoint = self._current_quat()
+        return self._quat_setpoint
+
+    def grasp_orientation(self) -> np.ndarray:
+        """A top-down approach orientation, as (qw, qx, qy, qz).
+
+        The gripper's approach axis is its local +z. At reset these tasks start
+        with the wrist pointing along world +x (a 90-degree rotation about y), so
+        a gripper that is never reoriented cannot close on an object lying on the
+        table however accurately it reaches. 180 degrees about x maps local +z to
+        world -z, which is straight down.
+        """
+        return np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32)
+
     def _tcp_vector(self) -> np.ndarray:
         """Flange -> fingertip offset in the env frame, for the current wrist pose.
 
@@ -664,7 +698,7 @@ class RoboLabEnv(Env):
         the agent rotates the wrist.
         """
         local = np.array([0.0, 0.0, self._tcp_offset], dtype=np.float32)
-        return _rotate_by_quat(local, self._current_quat())
+        return _rotate_by_quat(local, self._target_quat())
 
     def get_flange_pos(self):
         """The body the IK actually controls -- exposed for debugging."""

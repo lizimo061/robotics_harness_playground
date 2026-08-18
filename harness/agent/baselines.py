@@ -269,7 +269,7 @@ class ScriptedPickPlaceAgent(Agent):
 
     def __init__(self, *, source: str = "", target: str = "", max_steps: int = 120,
                  hover: float = 0.12, tol: float = 0.02, settle: int = 3,
-                 phase_budget: int = 14, **kwargs) -> None:
+                 phase_budget: int = 14, top_down: bool = True, **kwargs) -> None:
         self._source = source
         self._target = target
         self._max_steps = int(max_steps)
@@ -277,6 +277,10 @@ class ScriptedPickPlaceAgent(Agent):
         self._tol = float(tol)           # position tolerance before advancing
         self._settle = int(settle)       # steps to hold after a gripper change
         self._phase_budget = int(phase_budget)
+        #: Command a downward approach where the env offers one. A wrist left in
+        #: its start orientation cannot close on an object lying on a table, so
+        #: without this the probe reaches the right place and still never grasps.
+        self._top_down = bool(top_down)
 
     def _pos(self, env: Env, name: str):
         """Locate a named thing, whether the env calls it an object or a goal.
@@ -327,6 +331,11 @@ class ScriptedPickPlaceAgent(Agent):
 
         # emit actions in the env's own dimensionality: a planar env expects (x, y)
         dim = int(len(src_native))
+        grasp_quat = None
+        if self._top_down:
+            getter = getattr(env, "grasp_orientation", None)
+            if getter is not None:
+                grasp_quat = np.asarray(getter(), dtype=np.float32).ravel()[:4]
         up = np.array([0.0, 0.0, self._hover], dtype=np.float32)
         # (target position, gripper) -- the gripper is commanded on every step,
         # because a binary gripper action that is not repeated is released by the
@@ -348,9 +357,11 @@ class ScriptedPickPlaceAgent(Agent):
             for _ in range(self._phase_budget):
                 if ep.steps >= self._max_steps:
                     break
-                action = Action(kind="ee_pose",
-                                value=np.asarray(point, dtype=np.float32)[:dim],
-                                gripper=grip, comment=f"scripted -> {point.round(3)}")
+                value = np.asarray(point, dtype=np.float32)[:dim]
+                if grasp_quat is not None and dim >= 3:
+                    value = np.concatenate([value, grasp_quat])
+                action = Action(kind="ee_pose", value=value, gripper=grip,
+                                comment=f"scripted -> {point.round(3)}")
                 result = env.step(action)
                 ep.actions.append(action)
                 ep.rewards.append(result.reward)
@@ -368,9 +379,11 @@ class ScriptedPickPlaceAgent(Agent):
             for _ in range(self._settle if grip in (0.0, 1.0) else 0):
                 if done or ep.steps >= self._max_steps:
                     break
-                action = Action(kind="ee_pose",
-                                value=np.asarray(point, dtype=np.float32)[:dim],
-                                gripper=grip, comment="settle")
+                value = np.asarray(point, dtype=np.float32)[:dim]
+                if grasp_quat is not None and dim >= 3:
+                    value = np.concatenate([value, grasp_quat])
+                action = Action(kind="ee_pose", value=value, gripper=grip,
+                                comment="settle")
                 result = env.step(action)
                 ep.actions.append(action)
                 ep.rewards.append(result.reward)

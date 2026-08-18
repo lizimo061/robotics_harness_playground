@@ -68,6 +68,7 @@ def _env_for_action_tests(ee=(0.30, 0.00, 0.20), mode="ee_delta", space=None,
     # zero by default so each test below isolates one behaviour; the
     # tool-centre-point conversion has its own class.
     env._tcp_offset = 0.0
+    env._quat_setpoint = None
     return env
 
 
@@ -330,3 +331,74 @@ class TestToolCentrePoint(unittest.TestCase):
         out = np.asarray(env._to_env_action(
             Action(kind="ee_pose", value=[0.43, 0.0, 0.034]))).ravel()
         self.assertAlmostEqual(float(out[2]), 0.034, places=5)
+
+
+class TestOrientationControl(unittest.TestCase):
+    """Two orientation problems, both fatal to grasping.
+
+    The tools could not command an orientation at all, so the wrist kept whatever
+    pose it started in -- pointing along +x on these tasks, which cannot close on
+    an object lying on a table however accurately it reaches. And the commanded
+    orientation was read back from the measurement each step, which compounds the
+    differential IK's own orientation drift (RoboLab's DroidIKActionCfg docstring
+    warns about it): measured drift went from (0.707,0,0.707,0) at reset to
+    (-0.81,-0.08,-0.57,0.10) within a few dozen steps.
+    """
+
+    def _env(self, quat=(0.7071, 0.0, 0.7071, 0.0)):
+        env = _env_for_action_tests(mode="ee_pose", space=_FakeAbsSpace(), quat=quat)
+        return env
+
+    def test_a_seven_vector_commands_the_orientation(self):
+        import numpy as np
+
+        from harness.types import Action
+        env = self._env()
+        want = [0.0, 1.0, 0.0, 0.0]
+        out = np.asarray(env._to_env_action(
+            Action(kind="ee_pose", value=[0.4, 0.0, 0.2] + want))).ravel()
+        for got, exp in zip(out[3:7], want):
+            self.assertAlmostEqual(float(got), exp, places=5)
+
+    def test_the_setpoint_is_held_not_read_back_from_the_measurement(self):
+        import numpy as np
+
+        from harness.types import Action
+        env = self._env()
+        env._to_env_action(Action(kind="ee_pose",
+                                  value=[0.4, 0.0, 0.2, 0.0, 1.0, 0.0, 0.0]))
+        # the arm drifts...
+        env._last_proprio["ee_quat"] = np.asarray([-0.81, -0.08, -0.57, 0.10],
+                                                 dtype=np.float32)
+        out = np.asarray(env._to_env_action(
+            Action(kind="ee_pose", value=[0.4, 0.0, 0.2]))).ravel()
+        # ...and the command still asks for the orientation we set
+        self.assertAlmostEqual(float(out[3]), 0.0, places=5)
+        self.assertAlmostEqual(float(out[4]), 1.0, places=5)
+
+    def test_the_setpoint_seeds_from_the_pose_when_never_commanded(self):
+        import numpy as np
+
+        from harness.types import Action
+        env = self._env(quat=(0.7071, 0.0, 0.7071, 0.0))
+        out = np.asarray(env._to_env_action(
+            Action(kind="ee_pose", value=[0.4, 0.0, 0.2]))).ravel()
+        self.assertAlmostEqual(float(out[3]), 0.7071, places=3)
+
+    def test_a_non_unit_quaternion_is_ignored_rather_than_sent(self):
+        import numpy as np
+
+        from harness.types import Action
+        env = self._env()
+        out = np.asarray(env._to_env_action(
+            Action(kind="ee_pose", value=[0.4, 0.0, 0.2, 0.0, 0.0, 0.0, 0.0]))).ravel()
+        self.assertAlmostEqual(float(np.linalg.norm(out[3:7])), 1.0, places=4)
+
+    def test_the_grasp_orientation_points_the_approach_axis_down(self):
+        import numpy as np
+
+        import harness.envs.robolab as r
+        env = self._env()
+        down = env.grasp_orientation()
+        approach = r._rotate_by_quat([0.0, 0.0, 1.0], down)
+        self.assertAlmostEqual(float(approach[2]), -1.0, places=4)
