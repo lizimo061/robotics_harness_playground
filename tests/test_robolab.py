@@ -615,3 +615,51 @@ class TestSuccessSignalSource(unittest.TestCase):
     def test_is_success_uses_the_same_path(self):
         env = self._env_with({"time_out": False, "success": True})
         self.assertTrue(env._check_success())
+
+
+class TestRobotStateRestoration(unittest.TestCase):
+    """Restoring the objects but not the arm still leaks across episodes.
+
+    The next episode then starts from wherever the previous agent left the arm.
+    Measured: the scripted probe solved a task in 68 steps on a fresh env, and
+    burned its entire 260-step budget when it ran after two LLM episodes on the
+    same env -- because it began from a leaked arm configuration.
+    """
+
+    class _Robot:
+        def __init__(self):
+            import numpy as np
+            import types
+            self.data = types.SimpleNamespace(
+                joint_pos=np.zeros((1, 7), dtype=float) + 0.5,
+                joint_vel=np.zeros((1, 7), dtype=float) + 0.3,
+            )
+            self.written = None
+
+        def write_joint_state_to_sim(self, pos, vel):
+            self.written = (pos, vel)
+
+    def test_the_arm_state_is_captured_and_restored_with_zero_velocity(self):
+        import numpy as np
+        import harness.envs.robolab as r
+
+        env = r.RoboLabEnv.__new__(r.RoboLabEnv)
+        robot = self._Robot()
+        # torch-free stand-ins: clone()/unsqueeze() via numpy wrappers
+        class _T(np.ndarray):
+            def clone(self):
+                return self.copy().view(_T)
+            def unsqueeze(self, _):
+                return self[None].view(_T)
+        robot.data.joint_pos = np.asarray(robot.data.joint_pos).view(_T)
+        robot.data.joint_vel = np.asarray(robot.data.joint_vel).view(_T)
+        env._robot = lambda: robot
+        env._scene_objects = lambda: {}
+        env._home_state = {}
+        env._home_robot = None
+        env._capture_home_state()
+        self.assertIsNotNone(env._home_robot)
+        env._restore_home_state()
+        self.assertIsNotNone(robot.written)
+        _, vel = robot.written
+        self.assertTrue(float(np.abs(np.asarray(vel)).max()) == 0.0, "velocity not zeroed")

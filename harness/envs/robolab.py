@@ -185,6 +185,12 @@ class RoboLabEnv(Env):
         #: tabletop env had the identical defect, where it silently inflated every
         #: multi-episode success rate once a task had been solved.
         self._home_state: dict = {}
+        #: Spawn joint state of the robot itself. Restoring the objects but not the
+        #: arm still leaks: the next episode starts from wherever the previous agent
+        #: left the arm. Measured, this is the difference between the scripted probe
+        #: solving a task in 68 steps on a fresh env and burning its whole 260-step
+        #: budget when it runs after two LLM episodes on the same env.
+        self._home_robot: Optional[tuple] = None
 
     #: action_mode -> (registration module, function, env-name suffix).
     #: RoboLab registers one env per flavour and distinguishes them by suffix,
@@ -288,8 +294,24 @@ class RoboLabEnv(Env):
             self._capture_home_state()
         return self._to_obs(obs, info)
 
+    def _robot(self):
+        scene = self._scene()
+        if scene is None:
+            return None
+        try:
+            return scene["robot"]
+        except Exception:  # noqa: BLE001 - no articulation under that name
+            return getattr(scene, "articulations", {}).get("robot")
+
     def _capture_home_state(self) -> None:
-        """Remember the spawn state of each rigid object, once."""
+        """Remember the spawn state of each rigid object and of the arm, once."""
+        robot = self._robot()
+        data = getattr(robot, "data", None)
+        if data is not None:
+            try:
+                self._home_robot = (data.joint_pos[0].clone(), data.joint_vel[0].clone())
+            except Exception as e:  # noqa: BLE001 - not readable yet
+                log.debug("could not capture robot home state: %s", e)
         for name, entity in self._scene_objects().items():
             state = getattr(getattr(entity, "data", None), "root_state_w", None)
             if state is None:
@@ -309,6 +331,13 @@ class RoboLabEnv(Env):
         momentum from the previous episode drifts on the first steps of the next
         one, which is a slow leak rather than an obvious one.
         """
+        robot = self._robot()
+        if self._home_robot is not None and robot is not None:
+            try:
+                pos, vel = self._home_robot
+                robot.write_joint_state_to_sim(pos.unsqueeze(0), (vel * 0.0).unsqueeze(0))
+            except Exception as e:  # noqa: BLE001 - restoring must not break a run
+                log.debug("could not restore the arm: %s", e)
         objects = self._scene_objects()
         for name, state in self._home_state.items():
             entity = objects.get(name)
