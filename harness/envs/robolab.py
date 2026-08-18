@@ -255,9 +255,44 @@ class RoboLabEnv(Env):
     def reset(self, *, seed: Optional[int] = None) -> Obs:
         self._step_idx = 0
         self._quat_setpoint = None  # re-seeded from the fresh pose below
-        out = self._env.reset()
+        # Pass the seed through. It was being dropped, so every trial in a grid
+        # reset from IsaacLab's own advancing RNG instead of the requested seed:
+        # per-trial seeds controlled nothing, and a "seed" column in the results
+        # named something that never reached the simulator.
+        try:
+            out = self._env.reset(seed=seed) if seed is not None else self._env.reset()
+        except TypeError:  # an env whose reset takes no seed
+            out = self._env.reset()
         obs, info = self._unwrap_reset(out)
+        self._refresh_physics_buffers()
         return self._to_obs(obs, info)
+
+    def _refresh_physics_buffers(self) -> None:
+        """Bring the scene's cached poses up to date after a reset.
+
+        IsaacLab fills ``root_pos_w`` / ``body_pos_w`` from buffers that are
+        written during a sim step, so reading them straight after reset can return
+        the *previous* episode's values -- which then reach the agent as its first
+        observation and look exactly like an episode-state leak. Measured: a cube
+        left at z=0.041 by one attempt was still reported at 0.041 by the next
+        attempt's reset, instead of its 0.034 spawn height.
+        """
+        scene = self._scene()
+        if scene is None:
+            return
+        update = getattr(scene, "update", None)
+        if update is None:
+            return
+        dt = None
+        for holder in (getattr(self._env, "unwrapped", self._env), self._env):
+            sim = getattr(holder, "sim", None)
+            dt = getattr(sim, "get_physics_dt", lambda: None)() if sim is not None else None
+            if dt:
+                break
+        try:
+            update(dt or 1.0 / 120.0)
+        except Exception as e:  # noqa: BLE001 - a refresh failure must not block a run
+            log.debug("scene.update after reset failed: %s", e)
 
     def step(self, action: Action) -> StepResult:
         self._step_idx += 1
