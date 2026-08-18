@@ -1,0 +1,33 @@
+# A leaderboard job: the tasks x agents x seeds grid.
+#
+# The oracle and null rows are not optional decoration -- the oracle proves each
+# task is solvable and supplies the efficiency denominator, and null proves the
+# success check is not vacuous. A task the oracle fails, or null passes, is a
+# defect and every model's score on it is meaningless.
+#
+#   harness job configs/leaderboard_tabletop.yaml
+#   harness job configs/leaderboard_tabletop.yaml --summary-only   # re-aggregate
+job_name: tabletop-v1
+log_dir: logs
+env_name: tabletop
+
+tasks: [pick_place, pick_place_obstacle, push, stack, sort, reach_avoid]
+
+# Paired seeds: every agent sees the identical task x seed set, which is the
+# cheapest variance reduction available. See docs/modules/eval.md.
+seeds: [0, 1, 2, 3, 4]
+
+concurrency: 8
+max_retries: 2
+
+agents:
+  - {name: oracle,     max_steps: 300}
+  - {name: null_agent, max_steps: 300}
+
+  - name: llm_controller
+    provider: deepseek
+    model: deepseek-chat
+    mode: tools
+    max_steps: 20
+    temperature: 0.2
+    concurrency: 4        # keep one provider's rate limit off the global pool
