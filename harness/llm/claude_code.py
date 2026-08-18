@@ -29,6 +29,7 @@ so vision messages are refused rather than quietly flattened to their captions
 from __future__ import annotations
 
 import json
+import contextlib
 import shutil
 import subprocess
 import tempfile
@@ -95,6 +96,43 @@ def _is_image_block(block: Any) -> bool:
     return _block_type(block) in ("image", "image_url", "input_image")
 
 
+def _message_has_image(msg: ChatMessage) -> bool:
+    return (not isinstance(msg.content, str)
+            and any(_is_image_block(b) for b in msg.content))
+
+
+def _spill_image(block: Any, directory: str, index: int) -> Optional[str]:
+    """Write one image block to a PNG in `directory`; return its absolute path.
+
+    Accepts the two shapes this repo produces: an OpenAI-style
+    ``image_url.url`` data URI, and an Anthropic-style ``source.data`` base64
+    payload. Anything else is skipped rather than guessed at.
+    """
+    import base64
+    import os
+
+    data_b64 = None
+    if _block_type(block) == "image_url":
+        url = (block.get("image_url") or {}).get("url", "")
+        if isinstance(url, str) and "base64," in url:
+            data_b64 = url.split("base64,", 1)[1]
+    else:
+        source = block.get("source") or {}
+        if isinstance(source, dict):
+            data_b64 = source.get("data")
+    if not data_b64:
+        return None
+    try:
+        raw = base64.b64decode(data_b64)
+    except Exception as e:  # noqa: BLE001 - a bad payload is not worth killing a run
+        log.warning("could not decode an image block: %s", e)
+        return None
+    path = os.path.join(directory, f"frame_{index}.png")
+    with open(path, "wb") as fh:
+        fh.write(raw)
+    return path
+
+
 class ClaudeCodeClient(LLMClient):
     """Drives the local ``claude`` CLI as a plain text-completion backend.
 
@@ -127,6 +165,10 @@ class ClaudeCodeClient(LLMClient):
         # clients use -- a wedged sweep is worse than a lost episode.
         self._retries = int(extra.pop("retries", 1))
         self._on_image = str(extra.pop("on_image", "error")).lower()
+        #: Spill image blocks to disk so the CLI can read them. Off by default:
+        #: it grants the Read tool for those calls, which is a real capability
+        #: increase and should be asked for rather than assumed.
+        self._vision = bool(extra.pop("vision", False))
         # Pop both spellings unconditionally so neither lingers in _ignored_extra.
         cli_path, binary = extra.pop("cli_path", ""), extra.pop("binary", "")
         self._cli_path = str(cli_path or binary or "claude")
@@ -148,11 +190,17 @@ class ClaudeCodeClient(LLMClient):
 
     # ---- prompt assembly -------------------------------------------------
 
-    def _flatten(self, messages: list[ChatMessage]) -> str:
-        """Render the message list as one legibly-role-labelled transcript."""
+    def _flatten(self, messages: list[ChatMessage], *, image_dir=None) -> str:
+        """Render the message list as one legibly-role-labelled transcript.
+
+        With ``image_dir`` set, image blocks are written into it as PNGs and
+        referenced by absolute path, which is how the CLI actually accepts
+        pixels (verified: it reads the file with its Read tool and answers about
+        the contents). Without it, images are refused -- see _render_content.
+        """
         parts: list[str] = []
         for msg in messages:
-            body = self._render_content(msg).strip()
+            body = self._render_content(msg, image_dir=image_dir).strip()
             if not body:
                 # A bare "Assistant:" label with nothing under it reads as a
                 # cue to the model rather than as history; drop it.
@@ -161,28 +209,56 @@ class ClaudeCodeClient(LLMClient):
             parts.append(f"{label}:\n{body}")
         return "\n\n".join(parts)
 
-    def _render_content(self, msg: ChatMessage) -> str:
+    def _render_content(self, msg: ChatMessage, *, image_dir=None) -> str:
         if isinstance(msg.content, str):
             return msg.content
 
         texts: list[str] = []
         images = 0
+        written: list[str] = []
         for block in msg.content:
             if _block_type(block) == "text":
                 texts.append(str(block.get("text", "")))
             elif _is_image_block(block):
                 images += 1
+                if image_dir is not None:
+                    path = _spill_image(block, image_dir, len(written))
+                    if path is not None:
+                        written.append(path)
+
+        if written:
+            # The CLI reads pixels from a file, not from base64 in the prompt.
+            # Naming the path explicitly (rather than relying on @-syntax) keeps
+            # this working whether or not file-reference expansion is enabled.
+            for path in written:
+                texts.append(f"[image: {path}] -- read this file to see the "
+                             f"current camera view.")
+            return "\n".join(t for t in texts if t)
 
         if images:
             # Dropping pixels quietly is the exact bug class this harness has
             # been stamping out: a vision run that silently becomes a text run
             # still produces plausible-looking numbers.
-            detail = (
-                f"{self.name} cannot send images: the Claude Code CLI takes a text prompt "
-                f"only, so {images} image block(s) in a {msg.role!r} message have nowhere "
-                f"to go. Use provider 'claude' (the Messages API) for vision runs, or set "
-                f"extra.on_image='warn' to accept a text-only degradation."
-            )
+            if image_dir is not None:
+                # Vision was requested and the spill failed: the payload was not
+                # decodable. Say that, rather than blaming the CLI for being
+                # text-only when it is not.
+                detail = (
+                    f"{self.name}: vision is on, but none of the {images} image "
+                    f"block(s) in a {msg.role!r} message could be decoded to a PNG "
+                    f"(expected a base64 data URI or an Anthropic source.data "
+                    f"payload). Refusing to continue text-only, because the run "
+                    f"would look like a vision run."
+                )
+            else:
+                detail = (
+                    f"{self.name} cannot send images: the Claude Code CLI takes a text "
+                    f"prompt only, so {images} image block(s) in a {msg.role!r} message "
+                    f"have nowhere to go. Use provider 'claude' (the Messages API) for "
+                    f"vision runs, set extra.vision=true to spill frames to disk for the "
+                    f"CLI to read, or set extra.on_image='warn' to accept a text-only "
+                    f"degradation."
+                )
             if self._on_image == "warn":
                 log.warning("%s (continuing text-only)", detail)
                 texts.append(f"[{images} image(s) omitted: CLI backend is text-only]")
@@ -193,14 +269,19 @@ class ClaudeCodeClient(LLMClient):
 
     # ---- invocation ------------------------------------------------------
 
-    def _argv(self) -> list[str]:
+    def _argv(self, *, tools: str = "") -> list[str]:
         argv = [
             self._cli_path,
             "--print",  # headless: one prompt in, one answer out, no session
             "--output-format",
             "json",  # structured result envelope we can parse
             "--tools",
-            "",  # empty list disables every built-in tool (no file access)
+            # "" disables every built-in tool. Vision needs exactly one exception:
+            # with no tools the model cannot open the frame, and -- measured -- it
+            # does not error, it emits a transcript of the Read call it wanted to
+            # make and returns that as its answer. A silent wrong answer, so the
+            # image path grants Read and nothing else.
+            tools,
             "--disable-slash-commands",  # a prompt starting with '/' is text, not a skill
             "--strict-mcp-config",  # ignore the user's MCP servers
             "--no-session-persistence",  # don't litter ~/.claude with sweep sessions
@@ -212,8 +293,8 @@ class ClaudeCodeClient(LLMClient):
         argv += self._extra_args
         return argv
 
-    def _run(self, prompt: str, timeout: float) -> dict[str, Any]:
-        argv = self._argv()
+    def _run(self, prompt: str, timeout: float, *, tools: str = "") -> dict[str, Any]:
+        argv = self._argv(tools=tools)
         try:
             proc = subprocess.run(  # noqa: S603 - argv list, no shell
                 argv,
@@ -270,18 +351,36 @@ class ClaudeCodeClient(LLMClient):
         timeout: Optional[float] = None,
         **kwargs: Any,
     ) -> LLMResponse:
-        prompt = self._flatten(messages)
-        if not prompt.strip():
-            raise LLMError("refusing to invoke the claude CLI with an empty prompt")
-        if self._ignored_extra or kwargs:
-            log.debug(
-                "claude_code backend ignores unsupported knobs: %s",
-                sorted({*self._ignored_extra, *kwargs}),
+        # Images go to disk for the CLI to read; the directory lives only as long
+        # as the call, so a sweep does not accumulate frames.
+        has_images = any(_message_has_image(m) for m in messages)
+        if has_images and self._on_image == "error" and not self._vision:
+            raise LLMError(
+                f"{self.name} received image blocks but vision is off. Set "
+                f"extra.vision=true to spill frames to disk and let the CLI read "
+                f"them (this grants the Read tool for those calls), or use provider "
+                f"'claude' for the Messages API path."
             )
+        image_dir = None
+        stack = contextlib.ExitStack()
+        with stack:
+            if has_images and self._vision:
+                image_dir = stack.enter_context(
+                    tempfile.TemporaryDirectory(prefix="harness-frames-"))
+            prompt = self._flatten(messages, image_dir=image_dir)
+            if not prompt.strip():
+                raise LLMError("refusing to invoke the claude CLI with an empty prompt")
+            return self._complete_with(prompt, timeout,
+                                       tools="Read" if image_dir else "")
+
+    def _complete_with(self, prompt: str, timeout, tools: str) -> LLMResponse:
+        if self._ignored_extra:
+            log.debug("claude_code backend ignores unsupported knobs: %s",
+                      sorted(self._ignored_extra))
 
         eff_timeout = float(timeout or self._timeout)
         data = with_retries(
-            lambda: self._run(prompt, eff_timeout),
+            lambda: self._run(prompt, eff_timeout, tools=tools),
             retries=self._retries,
             exceptions=(TransientLLMError,),
         )

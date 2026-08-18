@@ -73,6 +73,38 @@ def is_offline_llm(llm: Any) -> bool:
     return (type(llm).__module__ or "").startswith("harness.llm.mock")
 
 
+#: Sections of a text observation that give away ground-truth world state. Kept as a
+#: conservative default for envs that do not implement their own redactor: it is better
+#: to withhold a line the agent could have earned by looking than to leak a coordinate
+#: and call the run "perception".
+_PRIVILEGED_SECTIONS = ("objects:", "goals:", "obstacles:", "distance to success")
+
+
+def _redact_coordinates(text: str) -> str:
+    """Drop the sections of an observation that reveal ground-truth object state.
+
+    Deliberately blunt, and it says what it removed rather than silently shortening
+    the prompt -- an agent that is told nothing about objects should be able to tell
+    that from its input.
+    """
+    out, skipping, removed = [], False, False
+    for line in text.splitlines():
+        low = line.strip().lower()
+        if any(low.startswith(s) for s in _PRIVILEGED_SECTIONS):
+            skipping, removed = True, True
+            continue
+        if skipping:
+            # section bodies are indented; a fresh unindented line ends the section
+            if line[:1].isspace():
+                continue
+            skipping = False
+        out.append(line)
+    if removed:
+        out.append("(Object and goal positions are withheld in this tier: "
+                   "use the perception tools to locate things.)")
+    return "\n".join(out)
+
+
 def _serialize_messages(messages: list[ChatMessage]) -> list[dict]:
     out = []
     for m in messages:
@@ -311,7 +343,7 @@ class LLMController:
             ep.observations.append(result.obs)
 
         for step in range(self._max_steps):
-            obs_text = env.get_text_state() or obs.to_text(env.observation_space.state_names) or "(no observation)"
+            obs_text = self._observation_text(env, obs)
             frame = env.render() if self._capture_frames else None
 
             if self._mode == "tools":
@@ -374,6 +406,29 @@ class LLMController:
         if self._recorder is not None:
             self._recorder.finish(success=ep.success, total_reward=ep.total_reward)
         return ep
+
+    def _observation_text(self, env, obs) -> str:
+        """The textual observation, redacted to the scaffolding tier.
+
+        Removing the query TOOLS is not enough: an env's text state may print exact
+        object coordinates, and then the perception tier is a privileged run wearing
+        a different label. Measured on tabletop -- a `tier: perception` episode solved
+        the task in four steps without ever calling `detect`, because the observation
+        already said `cube (0.391, 0.281)`.
+
+        So the tier governs the observation too. What survives redaction is what a
+        camera plus proprioception could tell you: the instruction, the arm's own
+        state, and the fact that objects exist.
+        """
+        text = (env.get_text_state()
+                or obs.to_text(env.observation_space.state_names)
+                or "(no observation)")
+        if self._tier == "privileged":
+            return text
+        redactor = getattr(env, "text_state_without_privileged_info", None)
+        if callable(redactor):
+            return redactor() or text
+        return _redact_coordinates(text)
 
     def _frame_for_vision(self, obs, frame):
         if not self._use_vision:

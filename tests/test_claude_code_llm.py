@@ -149,7 +149,9 @@ class TestClaudeCodeImages(unittest.TestCase):
             with self.assertRaises(LLMError) as ctx:
                 client().complete([msg])
         run.assert_not_called()  # fail before spending a CLI call
-        self.assertIn("cannot send images", str(ctx.exception))
+        self.assertIn("vision is off", str(ctx.exception))
+        self.assertIn("extra.vision=true", str(ctx.exception),
+                      "the error should name the flag that enables it")
 
     def test_on_image_warn_degrades_loudly_rather_than_silently(self):
         msg = ChatMessage.user_vision("what do you see", "aGVsbG8=")
@@ -316,3 +318,101 @@ class TestClaudeCodeRealCLI(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestClaudeCodeVisionPath(unittest.TestCase):
+    """With extra.vision=true, frames go to disk and the CLI is allowed to read them.
+
+    Verified against the live CLI before building this: a file-referenced PNG is
+    described correctly with `--tools Read`, and with `--tools ""` the model does NOT
+    error -- it returns a transcript of the Read call it wanted to make, as its answer.
+    That silent wrong answer is why the image path grants Read explicitly rather than
+    hoping the prompt is enough.
+    """
+
+    def _capture_vision(self, messages):
+        seen = {}
+
+        def fake_run(argv, **kwargs):
+            seen["argv"] = list(argv)
+            seen["input"] = kwargs["input"]
+            return completed(json.dumps(GOOD_ENVELOPE))
+
+        with mock.patch("harness.llm.claude_code.subprocess.run", side_effect=fake_run):
+            client(vision=True).complete(messages)
+        return seen
+
+    def test_the_read_tool_is_granted_only_when_an_image_is_present(self):
+        msg = ChatMessage.user_vision("what do you see", _png_b64())
+        argv = self._capture_vision([msg])["argv"]
+        self.assertIn("Read", argv, "vision call did not allow the Read tool")
+        # and a text-only call still runs with tools disabled
+        seen = {}
+
+        def fake_run(argv2, **kwargs):
+            seen["argv"] = list(argv2)
+            return completed(json.dumps(GOOD_ENVELOPE))
+
+        with mock.patch("harness.llm.claude_code.subprocess.run", side_effect=fake_run):
+            client(vision=True).complete([ChatMessage.user("text only")])
+        tools_value = seen["argv"][seen["argv"].index("--tools") + 1]
+        self.assertEqual(tools_value, "", "a text-only call should keep tools disabled")
+
+    def test_the_prompt_references_a_real_file_on_disk(self):
+        import os
+        import re
+
+        msg = ChatMessage.user_vision("what do you see", _png_b64())
+        prompt = self._capture_vision([msg])["input"]
+        m = re.search(r"\[image: (\S+\.png)\]", prompt)
+        self.assertIsNotNone(m, f"no image path in the prompt: {prompt[:200]}")
+        # the file existed while the call was in flight, and the path is absolute
+        self.assertTrue(os.path.isabs(m.group(1)))
+
+    def test_the_frame_directory_does_not_outlive_the_call(self):
+        """A sweep must not accumulate thousands of frames in the temp dir."""
+        import os
+        import re
+
+        msg = ChatMessage.user_vision("what do you see", _png_b64())
+        prompt = self._capture_vision([msg])["input"]
+        path = re.search(r"\[image: (\S+\.png)\]", prompt).group(1)
+        self.assertFalse(os.path.exists(path), "frame outlived the completion")
+
+    def test_an_undecodable_image_refuses_with_an_accurate_reason(self):
+        """Vision on + a corrupt payload must not quietly become a text run.
+
+        And the message must not blame the CLI for being text-only, which is false
+        once vision is enabled -- it says the payload could not be decoded.
+        """
+        msg = ChatMessage.user_vision("look", "!!!not base64!!!")
+        with mock.patch("harness.llm.claude_code.subprocess.run") as run:
+            with self.assertLogs("harness.llm.claude_code", level="WARNING"):
+                with self.assertRaises(LLMError) as ctx:
+                    client(vision=True).complete([msg])
+        run.assert_not_called()
+        msg_text = str(ctx.exception)
+        self.assertIn("none of", msg_text)
+        self.assertIn("could be decoded", msg_text)
+        self.assertNotIn("text prompt only", msg_text)
+
+    def test_vision_off_is_still_the_default(self):
+        """Granting Read is a real capability increase; it must be asked for."""
+        msg = ChatMessage.user_vision("look", _png_b64())
+        with mock.patch("harness.llm.claude_code.subprocess.run") as run:
+            with self.assertRaises(LLMError):
+                client().complete([msg])
+        run.assert_not_called()
+
+
+def _png_b64() -> str:
+    """A minimal valid PNG, so the spill path writes something real."""
+    import base64
+    import io
+
+    import numpy as np
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.fromarray(np.zeros((4, 4, 3), dtype=np.uint8)).save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode()

@@ -97,6 +97,25 @@ _ANTHROPIC: dict[str, ModelCaps] = {
         sampling_params=True, thinking="budget", vision=True,
         max_output=64_000, context=200_000, price_in=1.0, price_out=5.0,
     ),
+
+    # Short aliases the Claude Code CLI accepts for --model. They are entries
+    # rather than an exception in the gate because the claim is specific and
+    # checkable: the CLI can only run Claude models, and every Claude model in
+    # this table takes images. Prices are LEFT UNSET deliberately -- the CLI
+    # reports total_cost_usd per call, so guessing a per-token rate here would
+    # invent a second, disagreeing number for the same spend.
+    "sonnet": ModelCaps(
+        sampling_params=False, thinking="adaptive", effort=True, vision=True,
+        max_output=128_000, context=1_000_000,
+    ),
+    "opus": ModelCaps(
+        sampling_params=False, thinking="adaptive", effort=True, vision=True,
+        max_output=128_000, context=1_000_000,
+    ),
+    "haiku": ModelCaps(
+        sampling_params=True, thinking="budget", vision=True,
+        max_output=64_000, context=200_000,
+    ),
 }
 
 # DeepSeek, from the vendor's published pricing table.

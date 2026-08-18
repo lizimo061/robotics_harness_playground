@@ -301,3 +301,68 @@ class TestRunnerForwardsTheTier(unittest.TestCase):
 
         self.assertEqual(seen.get("tier"), "privileged")
         self.assertIsNone(seen.get("detector"))
+
+
+class TestTheTierRedactsTheObservation(unittest.TestCase):
+    """Removing the query tools is not enough to withdraw privileged state.
+
+    Found by running the thing: a `tier: perception` episode on tabletop solved the
+    task in four steps and never called `detect`, because the observation text already
+    said `cube (0.391, 0.281)`. The tier was a label on a privileged run -- exactly the
+    mislabelling the rest of this harness works to prevent.
+    """
+
+    def test_coordinates_are_withheld_in_the_perception_tier(self):
+        from harness.agent.llm_controller import _redact_coordinates
+        env = _env()
+        raw = env.get_text_state()
+        env.close()
+        self.assertIn("cube (", raw)  # the privileged text really does leak it
+        red = _redact_coordinates(raw)
+        self.assertNotIn("cube (", red)
+        self.assertNotIn("goal (", red)
+
+    def test_the_instruction_and_the_arm_survive(self):
+        """What a camera plus proprioception could tell you is not privileged."""
+        from harness.agent.llm_controller import _redact_coordinates
+        env = _env()
+        red = _redact_coordinates(env.get_text_state())
+        env.close()
+        self.assertIn("Task:", red)
+        self.assertIn("End-effector:", red)
+
+    def test_the_redaction_announces_itself(self):
+        """Silently shortening the prompt would leave the agent guessing why."""
+        from harness.agent.llm_controller import _redact_coordinates
+        env = _env()
+        red = _redact_coordinates(env.get_text_state())
+        env.close()
+        self.assertIn("withheld", red)
+        self.assertIn("perception tools", red)
+
+    def test_nothing_is_removed_when_there_is_nothing_privileged(self):
+        from harness.agent.llm_controller import _redact_coordinates
+        text = "Task: do the thing\nEnd-effector: (0.1, 0.2)"
+        self.assertEqual(_redact_coordinates(text), text)
+
+    def test_an_env_may_supply_its_own_redactor(self):
+        from harness.agent.llm_controller import LLMController
+        from harness.perception.detect import OracleDetector
+
+        class _Env(TabletopEnv):
+            def text_state_without_privileged_info(self):
+                return "CUSTOM REDACTION"
+
+        env = _Env(task="pick_place")
+        env.reset(seed=0)
+        ctrl = LLMController(None, mode="tools", tier="perception",
+                             detector=OracleDetector(env), allow_blind_vision=True)
+        self.assertEqual(ctrl._observation_text(env, env._observe()), "CUSTOM REDACTION")
+        env.close()
+
+    def test_the_privileged_tier_is_untouched(self):
+        from harness.agent.llm_controller import LLMController
+        env = _env()
+        ctrl = LLMController(None, mode="tools", tier="privileged")
+        self.assertEqual(ctrl._observation_text(env, env._observe()), env.get_text_state())
+        env.close()
