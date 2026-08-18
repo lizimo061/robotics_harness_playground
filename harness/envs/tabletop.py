@@ -252,6 +252,48 @@ class TabletopEnv(Env):
         lines.append(f"Distance to success: {self._primary_cost():.3f}")
         return "\n".join(lines)
 
+    def reward_dict(self) -> dict:
+        """Score this episode's outcome. The task owns its own scoring.
+
+        Beyond the binary gate, report the fraction of per-object goals met so
+        a near-miss is distinguishable from never moving -- graded metrics
+        separate policies with far fewer trials than binary success does.
+        """
+        placed = total = 0
+        for name, pos in self._objects.items():
+            goal_name = self._targets.get(name)
+            goal = self._goals.get(goal_name) if goal_name else None
+            if goal is None:
+                continue
+            total += 1
+            if float(np.linalg.norm(pos - goal)) < self._goal_radius:
+                placed += 1
+
+        success = self._check_success() and not self._collided
+        out = {
+            "success": 1 if success else 0,
+            "sim_steps": self._steps,
+            "collided": 1 if self._collided else 0,
+            "distance_to_goal": round(self._primary_cost(), 4),
+            "ee_path_length": round(self._path_length(), 4),
+        }
+        if total:
+            out["subtasks_completed"] = placed
+            out["subtasks_total"] = total
+            out["score"] = 1.0 if success else round(placed / total, 4)
+        return out
+
+    def _path_length(self) -> float:
+        """End-effector path length, the efficiency term for an SPL analogue."""
+        if len(self._trail) < 2:
+            return 0.0
+        return float(
+            sum(
+                np.linalg.norm(np.asarray(b) - np.asarray(a))
+                for a, b in zip(self._trail, self._trail[1:])
+            )
+        )
+
     def list_objects(self) -> list[str]:
         return list(self._objects.keys())
 

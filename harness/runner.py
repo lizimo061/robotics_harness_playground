@@ -1,11 +1,16 @@
 """High-level runner: config -> environment + LLM + agent -> evaluation."""
 from __future__ import annotations
 
+import time
+from pathlib import Path
+from typing import Optional
+
 from harness.agent.llm_controller import LLMController
 from harness.config import HarnessConfig, VizConfig
 from harness.envs.registry import get_env
 from harness.eval.logger import TrajectoryLogger
-from harness.eval.metrics import summarize
+from harness.eval.metrics import summarize, summarize_records
+from harness.eval.results import ResultsWriter, record_from_episode
 from harness.llm.registry import get_llm
 from harness.types import Episode
 from harness.utils.logging import get_logger
@@ -60,19 +65,50 @@ def run_eval(cfg: HarnessConfig) -> dict:
         **cfg.agent.extra,
     )
 
-    logger = TrajectoryLogger(log_dir=cfg.eval.log_dir, run_name=cfg.env.name)
+    # One directory per (model, env) so two models under comparison cannot
+    # append into the same file -- run_name=cfg.env.name collided by design.
+    model_id = (cfg.llm.model or cfg.llm.provider or "model").replace("/", "_")
+    run_name = f"{cfg.env.name.replace(':', '_')}__{model_id}"
+    logger = TrajectoryLogger(log_dir=cfg.eval.log_dir, run_name=run_name)
+    writer = ResultsWriter(Path(cfg.eval.log_dir) / run_name)
+    writer.write_config(cfg.to_dict())
+    # must match the record's env_name, which is how readers find this file
+    _task_id = getattr(env, "task", None) or getattr(getattr(env, "task_spec", None), "kind", None) or env.name
+    writer.write_task_config(str(_task_id), cfg.to_dict())
     if cfg.eval.save_trajectories:
         logger.log_config(cfg.to_dict())
 
     episodes: list[Episode] = []
+    records: list[dict] = []
     try:
         for i in range(cfg.eval.episodes):
-            ep = agent.run(env, seed=cfg.seed + i)
+            seed = cfg.seed + i
+            t0 = time.time()
+            err: Optional[BaseException] = None
+            try:
+                ep = agent.run(env, seed=seed)
+            except Exception as e:  # noqa: BLE001 - one bad episode must not kill the sweep
+                err = e
+                ep = Episode(metadata={"mode": cfg.agent.mode, "llm": llm.name, "env": env.name})
+                log.warning("episode %d raised %s: %s", i, type(e).__name__, e)
             episodes.append(ep)
+
+            rec = record_from_episode(
+                ep, env,
+                policy=model_id, seed=seed, episode_index=i,
+                mode=cfg.agent.mode, wall_clock_s=round(time.time() - t0, 3),
+                error=err,
+            )
+            writer.append(rec)
+            records.append(rec.to_dict())
+
             if cfg.eval.save_trajectories:
                 logger.log(ep)
             if cfg.eval.verbose:
-                log.info("episode %d: success=%s steps=%d reward=%.3f", i, ep.success, ep.steps, ep.total_reward)
+                log.info(
+                    "episode %d: success=%s steps=%d reward=%.3f mode=%s cost=%s",
+                    i, ep.success, ep.steps, ep.total_reward, rec.failure_mode, rec.cost_usd,
+                )
     finally:
         env.close()
         if viewer is not None and hasattr(viewer, "close"):
@@ -85,6 +121,13 @@ def run_eval(cfg: HarnessConfig) -> dict:
             log.info("visualization saved to %s (open in a browser)", path)
 
     summary = summarize(episodes)
+    summary["run_dir"] = str(writer.dir)
+    summary["results_file"] = str(writer.path)
+    if records:
+        summary["leaderboard"] = summarize_records(records)
     if cfg.eval.verbose:
-        log.info("summary: %s", summary)
+        log.info("summary: success_rate=%.3f ci95=%s width=%.1fpp cost=%s",
+                 summary.get("success_rate", 0.0), summary.get("success_ci_95"),
+                 summary.get("ci_width_pp", 0.0), summary.get("cost_usd"))
+        log.info("results: %s", writer.path)
     return summary
