@@ -34,6 +34,14 @@ class FailureMode:
     A model scoring 0 because its output could not be parsed is telling you
     about the prompt contract, not about its manipulation ability. Folding
     those into one success rate is the most common way a comparison lies.
+
+    Two questions need separating, and this taxonomy answers both:
+
+    - *Is this number trustworthy?* -> NOT_MODEL_FAULT (parse, context, provider,
+      harness).
+    - *Which part of the agent broke?* -> the world/planner split VoLoAgent uses.
+      A model that plans well but never notices trouble is a different thing from
+      one that mis-plans, and both used to read as ``task_failed``.
     """
 
     NONE = "none"                      # succeeded
@@ -47,8 +55,40 @@ class FailureMode:
     PROVIDER_ERROR = "provider_error"   # 5xx / rate limit after retries
     HARNESS_ERROR = "harness_error"     # our bug, not the model's
 
+    # --- where it went wrong, in VoLoAgent's terms ----------------------- #
+    # World failures: the plan was reasonable, the physical attempt was not.
+    WRONG_OBJECT = "wrong_object"        # acted on something the task did not name
+    STUCK = "stuck"                     # acted repeatedly with no state change
+    # Planner failures: the physical machinery did what it was told.
+    PLANNING_ERROR = "planning_error"    # declared done, or ordered subgoals, wrongly
+    MISSED_FAILURE = "missed_failure_detection"   # saw divergence and continued anyway
+    TOOL_MISMATCH = "tool_mismatch"      # called a tool that cannot do what was needed
+
     #: modes that indicate the harness or provider failed, not the model.
     NOT_MODEL_FAULT = (PARSE_FAILURE, CONTEXT_EXCEEDED, PROVIDER_ERROR, HARNESS_ERROR)
+
+    #: the physical attempt failed
+    WORLD_FAILURE = (WRONG_OBJECT, STUCK)
+    #: the agent's reasoning failed
+    PLANNER_FAILURE = (PLANNING_ERROR, MISSED_FAILURE, TOOL_MISMATCH, NO_PROGRESS)
+
+    @classmethod
+    def blame(cls, mode: str) -> str:
+        """'world' | 'planner' | 'harness' | 'none' | 'unattributed'.
+
+        ``task_failed`` and ``agent_timeout`` stay deliberately *unattributed*: they
+        say the task was not solved, not whose fault that was. Bucketing them would
+        manufacture attribution the harness has not earned.
+        """
+        if mode in (None, "", cls.NONE):
+            return "none"
+        if mode in cls.NOT_MODEL_FAULT:
+            return "harness"
+        if mode in cls.WORLD_FAILURE:
+            return "world"
+        if mode in cls.PLANNER_FAILURE:
+            return "planner"
+        return "unattributed"
 
 
 def _num(v: Any) -> Any:
@@ -117,6 +157,12 @@ def classify_failure(ep: Episode, *, error: Optional[BaseException] = None) -> s
     # so an agent that queried itself to death looked like a task failure.
     # Both keys must actually be present -- `None == None` would otherwise make
     # every metadata-less failure look like a timeout.
+    # Where did it go wrong? These are checked before the budget verdict, because
+    # "ran out of turns" describes when an episode stopped, not what was wrong with it.
+    blame = _attribute_failure(ep)
+    if blame is not None:
+        return blame
+
     calls, budget = ep.metadata.get("llm_calls"), ep.metadata.get("max_steps")
     if calls is not None and budget is not None and calls >= budget:
         # Never touching the environment is a different diagnosis from trying
@@ -124,6 +170,53 @@ def classify_failure(ep: Episode, *, error: Optional[BaseException] = None) -> s
         # than at the task.
         return FailureMode.NO_PROGRESS if ep.steps == 0 else FailureMode.AGENT_TIMEOUT
     return FailureMode.TASK_FAILED
+
+
+def _attribute_failure(ep: Episode) -> Optional[str]:
+    """Attribute a failure to the world or the planner, when the trace supports it.
+
+    Returns None when it does not: an unattributed failure is an honest one, and
+    guessing here would put fabricated blame into a report. Each rule needs positive
+    evidence in the episode.
+    """
+    meta = ep.metadata or {}
+
+    # The planner declared completion and the task was not complete. This is the one
+    # unambiguous planning error available from a trace.
+    if ep.actions and ep.actions[-1].kind == "stop" and not ep.success:
+        return FailureMode.PLANNING_ERROR
+
+    # It saw a monitor observation showing divergence and chose to continue anyway.
+    # Only measurable because P2 created a moment where that choice exists.
+    if meta.get("monitor_continues_after_divergence"):
+        return FailureMode.MISSED_FAILURE
+
+    # It acted on something the task never named.
+    touched = meta.get("objects_touched")
+    named = meta.get("objects_in_instruction")
+    if touched and named and not (set(touched) & set(named)):
+        return FailureMode.WRONG_OBJECT
+
+    # It kept acting and the world stopped responding. Needs a real trace: several
+    # env steps whose observations are byte-identical.
+    if _is_stuck(ep):
+        return FailureMode.STUCK
+
+    return None
+
+
+def _is_stuck(ep: Episode, *, window: int = 8) -> bool:
+    """True when the last `window` steps produced no change in observed state.
+
+    A short window would fire on a legitimate pause (a gripper closing, a controller
+    settling), so this deliberately needs a sustained run of identical observations.
+    """
+    texts = [getattr(o, "text", None) for o in (ep.observations or [])]
+    texts = [t for t in texts if t]
+    if len(texts) < window:
+        return False
+    tail = texts[-window:]
+    return len(set(tail)) == 1
 
 
 @dataclass

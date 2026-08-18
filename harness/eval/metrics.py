@@ -203,6 +203,16 @@ def summarize_records(
             entry["not_model_fault"] = not_model
             entry["not_model_fault_pct"] = round(100 * not_model / n, 1)
 
+        # Where the failures land: the world, the planner, the harness, or nowhere we
+        # can justify. "unattributed" is reported rather than hidden -- an agent whose
+        # failures are mostly unattributed means the trace is not telling us enough,
+        # which is itself worth seeing.
+        blame: dict = {}
+        for mode, count in fails.items():
+            blame[FailureMode.blame(mode)] = blame.get(FailureMode.blame(mode), 0) + count
+        if blame:
+            entry["blame"] = {k2: v for k2, v in sorted(blame.items())}
+
         # Efficiency, reported beside success and never folded into it: one
         # SPL number cannot distinguish "half the episodes failed" from "all
         # succeeded at twice the optimal path".
