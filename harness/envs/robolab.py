@@ -169,6 +169,14 @@ class RoboLabEnv(Env):
         #: next command compounds it -- measured here going from (0.707,0,0.707,0)
         #: at reset to (-0.81,-0.08,-0.57,0.10) after a few dozen steps.
         self._quat_setpoint: Optional[np.ndarray] = None
+        #: Spawn state of every rigid object, captured on the first reset and
+        #: written back on later ones. RoboLab's reset() does not restore object
+        #: poses, so without this an episode inherits the previous one's layout:
+        #: measured, a cube nudged to z=0.041 by one attempt was still at 0.041
+        #: when the next attempt began, instead of its 0.034 spawn height. The
+        #: tabletop env had the identical defect, where it silently inflated every
+        #: multi-episode success rate once a task had been solved.
+        self._home_state: dict = {}
 
     #: action_mode -> (registration module, function, env-name suffix).
     #: RoboLab registers one env per flavour and distinguishes them by suffix,
@@ -265,7 +273,51 @@ class RoboLabEnv(Env):
             out = self._env.reset()
         obs, info = self._unwrap_reset(out)
         self._refresh_physics_buffers()
+        if self._home_state:
+            self._restore_home_state()
+            self._refresh_physics_buffers()
+        else:
+            self._capture_home_state()
         return self._to_obs(obs, info)
+
+    def _capture_home_state(self) -> None:
+        """Remember the spawn state of each rigid object, once."""
+        for name, entity in self._scene_objects().items():
+            state = getattr(getattr(entity, "data", None), "root_state_w", None)
+            if state is None:
+                continue
+            try:
+                self._home_state[name] = state[0].clone()
+            except Exception as e:  # noqa: BLE001 - not a tensor we can copy
+                log.debug("could not capture home state for %s: %s", name, e)
+        if self._home_state:
+            log.info("captured spawn state for %d object(s); later resets restore it",
+                     len(self._home_state))
+
+    def _restore_home_state(self) -> None:
+        """Put every object back where it spawned, with zero velocity.
+
+        Zeroing the velocity matters as much as the pose: an object still carrying
+        momentum from the previous episode drifts on the first steps of the next
+        one, which is a slow leak rather than an obvious one.
+        """
+        objects = self._scene_objects()
+        for name, state in self._home_state.items():
+            entity = objects.get(name)
+            if entity is None:
+                continue
+            try:
+                target = state.clone()
+                target[7:] = 0.0  # linear + angular velocity
+                write = getattr(entity, "write_root_state_to_sim", None)
+                if write is not None:
+                    write(target.unsqueeze(0))
+                    continue
+                pose = getattr(entity, "write_root_pose_to_sim", None)
+                if pose is not None:
+                    pose(target[:7].unsqueeze(0))
+            except Exception as e:  # noqa: BLE001 - restoring must not break a run
+                log.debug("could not restore %s: %s", name, e)
 
     def _refresh_physics_buffers(self) -> None:
         """Bring the scene's cached poses up to date after a reset.
