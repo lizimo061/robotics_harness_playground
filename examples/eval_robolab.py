@@ -38,7 +38,12 @@ parser.add_argument("--tasks", default="RubiksCubeTask",
 parser.add_argument("--episodes", type=int, default=2, help="episodes per task")
 parser.add_argument("--mode", default="tools", choices=["json", "tools", "code", "plan", "skills"])
 parser.add_argument("--max-steps", type=int, default=40, help="LLM turn budget per episode")
-parser.add_argument("--action-mode", default="ee_delta", choices=["ee_delta", "joint_position"])
+# The mode selects RoboLab's action flavour, so the list must match the adapter's
+# registrar table -- omitting one here silently makes it unreachable.
+parser.add_argument("--action-mode", default="ee_pose",
+                    choices=["ee_pose", "ee_delta", "joint_position"],
+                    help="ee_pose = absolute EE pose via IK (what move_to means); "
+                         "ee_delta = relative IK; joint_position = raw joint targets")
 parser.add_argument("--provider", default="deepseek")
 parser.add_argument("--model", default="deepseek-chat")
 parser.add_argument("--out", default="runs/robolab-live", help="output directory")

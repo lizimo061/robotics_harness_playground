@@ -55,7 +55,7 @@ class RoboLabEnv(Env):
         device: str = "cuda:0",
         use_fabric: bool = False,
         headless: bool = True,
-        action_mode: str = "ee_delta",  # "ee_delta" | "joint_position"
+        action_mode: str = "ee_pose",  # "ee_pose" (abs IK) | "ee_delta" (rel IK) | "joint_position"
         seed: int = 0,
         **kwargs: Any,
     ) -> None:
@@ -79,7 +79,14 @@ class RoboLabEnv(Env):
         # failing. The IK flavours take Cartesian targets, which is what the
         # move_to / move_delta tools actually mean.
         self._auto_register, suffix = self._registrar_for(action_mode)
-        self._auto_register()  # populate the env factory
+        # The suffix must be requested explicitly. RoboLab's abs/rel IK
+        # registrars document that they append "AbsIK"/"RelIK" to every env name,
+        # but they forward a caller-supplied `env_postfix` that defaults to empty
+        # -- so by default all three flavours register under the SAME names and
+        # each call silently replaces the last (hence RoboLab's own
+        # "previous registration will be replaced" warnings). Passing it keeps the
+        # flavours distinct, so the name we create is the interface we asked for.
+        self._auto_register(**({"env_postfix": suffix} if suffix else {}))
 
         task_name = self._resolve_task(get_envs, task, suffix)
 
@@ -133,13 +140,20 @@ class RoboLabEnv(Env):
             if not found:
                 raise ValueError("no RoboLab tasks are registered")
             return found[0]
+
+        def query(name):
+            # get_envs raises for an unknown name rather than returning empty
+            try:
+                return get_envs(task=[name]) or []
+            except Exception:  # noqa: BLE001 - unknown name for this registry
+                return []
+
         wanted = f"{task}{suffix}"
         for candidate in (wanted, task):
-            found = get_envs(task=[candidate]) or []
-            exact = [f for f in found if str(f) == wanted]
+            exact = [f for f in query(candidate) if str(f) == wanted]
             if exact:
                 return exact[0]
-        found = get_envs(task=[task]) or []
+        found = query(task)
         if found:
             log.warning("no %r variant of %r; falling back to %s -- verify its "
                         "action space matches the requested mode",
