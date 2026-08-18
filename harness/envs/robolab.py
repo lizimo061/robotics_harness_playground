@@ -290,9 +290,29 @@ class RoboLabEnv(Env):
         if self._home_state:
             self._restore_home_state()
             self._refresh_physics_buffers()
+            # The observation above was computed by reset(), i.e. BEFORE the
+            # restoration -- returning it hands the agent the previous episode's
+            # pose as its first observation, and makes the restore look like it
+            # never happened even when it worked.
+            fresh = self._recompute_obs()
+            if fresh is not None:
+                obs = fresh
         else:
             self._capture_home_state()
         return self._to_obs(obs, info)
+
+    def _recompute_obs(self):
+        """Ask the observation manager for observations reflecting the current state."""
+        unwrapped = getattr(self._env, "unwrapped", self._env)
+        manager = getattr(unwrapped, "observation_manager", None)
+        compute = getattr(manager, "compute", None) if manager is not None else None
+        if compute is None:
+            return None
+        try:
+            return compute()
+        except Exception as e:  # noqa: BLE001 - fall back to the reset observation
+            log.debug("could not recompute observations after restore: %s", e)
+            return None
 
     def _robot(self):
         scene = self._scene()
@@ -311,7 +331,9 @@ class RoboLabEnv(Env):
             try:
                 self._home_robot = (data.joint_pos[0].clone(), data.joint_vel[0].clone())
             except Exception as e:  # noqa: BLE001 - not readable yet
-                log.debug("could not capture robot home state: %s", e)
+                log.warning("could not capture the arm's spawn state (%s: %s); "
+                            "cross-episode restoration is disabled",
+                            type(e).__name__, e)
         for name, entity in self._scene_objects().items():
             state = getattr(getattr(entity, "data", None), "root_state_w", None)
             if state is None:
@@ -332,12 +354,40 @@ class RoboLabEnv(Env):
         one, which is a slow leak rather than an obvious one.
         """
         robot = self._robot()
+        if self._home_robot is None or robot is None:
+            if not getattr(self, "_warned_no_restore", False):
+                self._warned_no_restore = True
+                log.warning("cannot restore the arm across episodes "
+                            "(home_state=%s robot=%s); episodes are NOT independent",
+                            self._home_robot is not None, robot is not None)
         if self._home_robot is not None and robot is not None:
-            try:
-                pos, vel = self._home_robot
-                robot.write_joint_state_to_sim(pos.unsqueeze(0), (vel * 0.0).unsqueeze(0))
-            except Exception as e:  # noqa: BLE001 - restoring must not break a run
-                log.debug("could not restore the arm: %s", e)
+            pos, vel = self._home_robot
+            # Clear the articulation's internal buffers first. Writing joint STATE
+            # does not clear the controller's position TARGETS, so the arm is placed
+            # at home and then immediately driven back toward wherever the previous
+            # agent left it -- the leak survives a state write and looks like the
+            # arm refusing to follow commands.
+            for step in ("reset", None):
+                try:
+                    if step == "reset":
+                        fn = getattr(robot, "reset", None)
+                        if fn is not None:
+                            fn()
+                    else:
+                        robot.write_joint_state_to_sim(pos.unsqueeze(0),
+                                                      (vel * 0.0).unsqueeze(0))
+                        target = getattr(robot, "set_joint_position_target", None)
+                        if target is not None:
+                            target(pos.unsqueeze(0))
+                        write_targets = getattr(robot, "write_data_to_sim", None)
+                        if write_targets is not None:
+                            write_targets()
+                except Exception as e:  # noqa: BLE001 - restoring must not break a run
+                    if not getattr(self, "_warned_restore_err", False):
+                        self._warned_restore_err = True
+                        log.warning("arm restore step %r failed (%s: %s); episodes may "
+                                    "not be independent", step or "state",
+                                    type(e).__name__, e)
         objects = self._scene_objects()
         for name, state in self._home_state.items():
             entity = objects.get(name)
