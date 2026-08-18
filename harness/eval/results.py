@@ -242,8 +242,12 @@ class ResultsWriter:
         self.count = 0
 
     def append(self, record: TrialRecord) -> None:
+        self.append_dict(record.to_dict())
+
+    def append_dict(self, record: dict) -> None:
+        """Append an already-serialised record (the job runner's path)."""
         with self.path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record.to_dict()) + "\n")
+            f.write(json.dumps(_num(record)) + "\n")
             f.flush()
         self.count += 1
 
