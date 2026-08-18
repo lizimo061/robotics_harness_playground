@@ -111,6 +111,10 @@ class VizConfig:
     #: and outcome are appended to the stem, because a directory of videos is
     #: only useful if you can tell which one is the failure without opening them.
     video: str = ""
+    #: capture every Nth environment step for the video. One tool call can drive
+    #: many env steps, so frames are taken at the env boundary rather than once
+    #: per LLM turn; raise this for long episodes.
+    capture_every: int = 1
     fps: int = 8
     capture_frames: bool = True
     title: str = ""

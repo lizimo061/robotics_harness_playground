@@ -297,6 +297,30 @@ class RoboLabEnv(Env):
             return np.concatenate(parts) if parts else None
         return np.asarray(x).ravel().astype(np.float32)
 
+    def _clip_delta(self, delta: np.ndarray, dim: int) -> np.ndarray:
+        """Clip a positional delta to the env's own per-step action limits.
+
+        A single step cannot cross the workspace: the controller saturates, and
+        an unclipped command wastes the step while telling the agent nothing. By
+        clipping here the agent's feedback (its new pose) reflects the real
+        motion, so it can iterate toward the target across turns.
+        """
+        limit = getattr(self, "_delta_limit", None)
+        if limit is None:
+            sp = getattr(self._env, "action_space", None)
+            high = getattr(sp, "high", None)
+            arr = _to_numpy(high)
+            if arr is not None:
+                arr = np.abs(np.asarray(arr, dtype=np.float32).ravel())
+                # the last dim is the gripper; positional limits are the rest
+                positional = arr[:-1] if arr.size > 1 else arr
+                finite = positional[np.isfinite(positional)]
+                limit = float(np.min(finite)) if finite.size else 1.0
+            else:
+                limit = 1.0
+            self._delta_limit = limit
+        return np.clip(delta, -limit, limit).astype(np.float32)
+
     def _to_env_action(self, action: Action):
         sp = getattr(self._env, "action_space", None)
         dim = int(np.prod(sp.shape)) if sp is not None and hasattr(sp, "shape") else 0
@@ -305,6 +329,24 @@ class RoboLabEnv(Env):
             v = np.zeros(dim, dtype=np.float32)
         else:
             v = np.asarray(v, dtype=np.float32).ravel()
+
+        # Respect the action *kind*. RoboLab's controller consumes relative
+        # end-effector deltas, so passing an absolute target through unchanged
+        # makes `move_to(0.43, -0.10, 0.03)` a command to jump 43cm -- the agent
+        # can then never deliberately reach anything, and the resulting failures
+        # look like the model's when they are ours.
+        if action.kind in ("ee_pose", "pose", "absolute") and v.size >= 2:
+            current = self.get_ee_pos()
+            if current is None:
+                log.warning("absolute move requested but the end-effector pose is "
+                            "unknown; treating it as a delta")
+            else:
+                cur = np.asarray(current, dtype=np.float32).ravel()
+                target = v[:3] if v.size >= 3 else np.concatenate([v[:2], cur[2:3]])
+                n = min(len(target), len(cur))
+                delta = np.zeros(3, dtype=np.float32)
+                delta[:n] = target[:n] - cur[:n]
+                v = self._clip_delta(delta, dim)
         if action.gripper is not None:
             v = v.copy()
             if v.size >= 1:
@@ -337,13 +379,98 @@ class RoboLabEnv(Env):
         return False
 
     # -- text / subgoal --------------------------------------------------- #
+    # -- scene query API -------------------------------------------------- #
+    # A text-only model cannot see the camera frame, so without these it knows
+    # the instruction and its own arm pose and nothing else: it cannot locate the
+    # cube it is asked to pick up. Measured effect of that blindness on a live
+    # DeepSeek run: it called `done` after a single environment step, because
+    # flailing and stopping are indistinguishable when you have no feedback.
+    #
+    # The poses come from Isaac's ground-truth scene state, which makes this a
+    # privileged-state evaluation -- it measures planning and grounding, not
+    # perception. That is the same contract the tabletop env offers, and it is
+    # worth stating plainly in any result: a model doing well here has not been
+    # shown to perceive anything.
+
+    def _scene(self):
+        unwrapped = getattr(self._env, "unwrapped", self._env)
+        return getattr(unwrapped, "scene", None)
+
+    def _scene_objects(self) -> dict:
+        """Map name -> scene entity for every manipulable rigid body.
+
+        IsaacLab's InteractiveScene holds rigid objects in a dict-like
+        ``rigid_objects``; articulations (the robot) live separately and are
+        excluded, since "objects" here means things the task is about.
+        """
+        scene = self._scene()
+        if scene is None:
+            return {}
+        found: dict = {}
+        for attr in ("rigid_objects", "rigid_object_collections", "deformable_objects"):
+            group = getattr(scene, attr, None)
+            if not group:
+                continue
+            try:
+                for name in list(group):
+                    found[str(name)] = group[name]
+            except Exception:  # noqa: BLE001 - not dict-like; skip this group
+                continue
+        return found
+
+    def _entity_pos(self, entity):
+        """Position in the env frame, which is what the actions are relative to.
+
+        Isaac reports world coordinates; with num_envs > 1 every env is offset on
+        a grid, so a world pose is not comparable to the arm's own frame.
+        """
+        data = getattr(entity, "data", None)
+        pos = getattr(data, "root_pos_w", None)
+        if pos is None:
+            pos = getattr(data, "object_pos_w", None)
+        if pos is None:
+            return None
+        arr = _to_numpy(pos)
+        if arr is None:
+            return None
+        arr = np.asarray(arr, dtype=np.float32).reshape(-1, 3)[0]
+        scene = self._scene()
+        origins = _to_numpy(getattr(scene, "env_origins", None))
+        if origins is not None:
+            origins = np.asarray(origins, dtype=np.float32).reshape(-1, 3)
+            if len(origins):
+                arr = arr - origins[0]
+        return arr
+
+    def list_objects(self) -> list:
+        return sorted(self._scene_objects())
+
+    def get_object_pos(self, name: str):
+        entity = self._scene_objects().get(str(name))
+        return None if entity is None else self._entity_pos(entity)
+
+    def list_goals(self) -> list:
+        """RoboLab states goals in language, not as coordinates.
+
+        Returning [] is honest: a container the task names ("the bowl") shows up
+        in list_objects with a real pose, so the agent is not missing anything --
+        inventing goal coordinates would be.
+        """
+        return []
+
     def get_text_state(self) -> str:
-        """Instruction plus whatever proprioception the observation carries.
+        """Instruction, scene objects, and whatever proprioception we have.
 
         Returning the bare instruction leaves the agent blind: identical text
         every step, no feedback that an action did anything.
         """
         lines = [f"Task: {self._instruction}"]
+        objects = self._scene_objects()
+        if objects:
+            lines.append("Objects in the scene (x, y, z in the robot's frame):")
+            for name in sorted(objects):
+                pos = self._entity_pos(objects[name])
+                lines.append(f"  {name}: " + (_fmt_vec(pos) if pos is not None else "unknown"))
         p = self._last_proprio or {}
         if "ee_pos" in p:
             lines.append("End-effector position: " + _fmt_vec(p["ee_pos"]))

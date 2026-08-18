@@ -13,8 +13,108 @@ class TestRoboLabModule(unittest.TestCase):
         import harness.envs.robolab as r
 
         with self.assertRaises(ImportError):
-            r.RoboLabEnv(task="PickCubeTask")
+            r.RoboLabEnv(task="RubiksCubeTask")
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _FakeSpace:
+    shape = (4,)
+    low = [-0.05, -0.05, -0.05, 0.0]
+    high = [0.05, 0.05, 0.05, 1.0]
+
+
+class _FakeInner:
+    """Stands in for the IsaacLab env: an action space and a device, no sim."""
+
+    action_space = _FakeSpace()
+    device = "cpu"
+
+
+def _env_for_action_tests(ee=(0.30, 0.00, 0.20)):
+    """A RoboLabEnv with its heavy __init__ bypassed.
+
+    Constructing the real thing needs Isaac Sim, but _to_env_action is pure
+    arithmetic on the action space and the current pose, which is exactly the
+    part that was wrong.
+    """
+    import numpy as np
+
+    import harness.envs.robolab as r
+
+    env = r.RoboLabEnv.__new__(r.RoboLabEnv)
+    env._env = _FakeInner()
+    env._num_envs = 1
+    env._action_mode = "ee_delta"
+    env._last_proprio = {"ee_pos": np.asarray(ee, dtype=np.float32)}
+    return env
+
+
+class TestActionConversion(unittest.TestCase):
+    """An absolute target must become a delta, or the agent cannot aim.
+
+    Passing `move_to`'s absolute coordinates straight through made every one a
+    command to jump most of a metre; RoboLab's controller saturates, so the arm
+    lurched and the agent's failures looked like the model's rather than ours.
+    """
+
+    def test_an_absolute_move_becomes_a_clipped_delta(self):
+        import numpy as np
+
+        from harness.types import Action
+        env = _env_for_action_tests(ee=(0.30, 0.0, 0.20))
+        out = np.asarray(env._to_env_action(
+            Action(kind="ee_pose", value=[0.43, -0.10, 0.03]))).ravel()
+        # target - current = (+0.13, -0.10, -0.17), clipped to the +-0.05 limit
+        self.assertAlmostEqual(float(out[0]), 0.05, places=5)
+        self.assertAlmostEqual(float(out[1]), -0.05, places=5)
+        self.assertAlmostEqual(float(out[2]), -0.05, places=5)
+
+    def test_the_delta_points_at_the_target(self):
+        import numpy as np
+
+        from harness.types import Action
+        env = _env_for_action_tests(ee=(0.30, 0.0, 0.20))
+        out = np.asarray(env._to_env_action(
+            Action(kind="ee_pose", value=[0.32, 0.01, 0.19]))).ravel()
+        # inside the limit, so it should be the exact difference
+        self.assertAlmostEqual(float(out[0]), 0.02, places=5)
+        self.assertAlmostEqual(float(out[1]), 0.01, places=5)
+        self.assertAlmostEqual(float(out[2]), -0.01, places=5)
+
+    def test_a_relative_move_is_left_alone(self):
+        import numpy as np
+
+        from harness.types import Action
+        env = _env_for_action_tests()
+        out = np.asarray(env._to_env_action(
+            Action(kind="ee_delta", value=[0.01, -0.02, 0.0]))).ravel()
+        self.assertAlmostEqual(float(out[0]), 0.01, places=5)
+        self.assertAlmostEqual(float(out[1]), -0.02, places=5)
+
+    def test_the_gripper_occupies_the_last_dim(self):
+        import numpy as np
+
+        from harness.types import Action
+        env = _env_for_action_tests()
+        out = np.asarray(env._to_env_action(Action(kind="noop", gripper=1.0))).ravel()
+        self.assertEqual(len(out), 4)
+        self.assertAlmostEqual(float(out[-1]), 1.0, places=5)
+
+    def test_an_absolute_move_without_a_known_pose_degrades_instead_of_crashing(self):
+        import numpy as np
+
+        from harness.types import Action
+        env = _env_for_action_tests()
+        env._last_proprio = {}
+        out = np.asarray(env._to_env_action(
+            Action(kind="ee_pose", value=[0.4, 0.1, 0.2]))).ravel()
+        self.assertEqual(len(out), 4)
+
+    def test_the_delta_limit_comes_from_the_action_space(self):
+        env = _env_for_action_tests()
+        import numpy as np
+        clipped = env._clip_delta(np.asarray([10.0, -10.0, 10.0], dtype=np.float32), 4)
+        self.assertTrue(all(abs(float(c)) <= 0.05 + 1e-6 for c in clipped))

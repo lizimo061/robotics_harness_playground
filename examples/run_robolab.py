@@ -4,9 +4,9 @@ Run INSIDE the RoboLab venv (Linux + CUDA). The Isaac Sim AppLauncher must be
 created BEFORE importing RoboLab/IsaacLab, so this script follows RoboLab's own
 example pattern.
 
-    python examples/run_robolab.py --task PickCubeTask --headless          # real DeepSeek (tools mode)
+    python examples/run_robolab.py --task RubiksCubeTask --headless          # real DeepSeek (tools mode)
     python examples/run_robolab.py --task BananaInBowlTask --mode tools --headless
-    python examples/run_robolab.py --task PickCubeTask --scripted --headless   # offline, no API key
+    python examples/run_robolab.py --task RubiksCubeTask --scripted --headless   # offline, no API key
 
 Hierarchical mode (policy-as-tool): the LLM plans and a trained VLA executes.
 Point --policy-url at a policy server speaking the harness protocol (see
@@ -28,7 +28,7 @@ from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description="Run a RoboLab task with the harness agent")
 AppLauncher.add_app_launcher_args(parser)
-parser.add_argument("--task", default="PickCubeTask", help="RoboLab task class name")
+parser.add_argument("--task", default="RubiksCubeTask", help="RoboLab task class name")
 parser.add_argument("--mode", default="tools", choices=["json", "tools", "code", "plan", "skills"])
 parser.add_argument("--max-steps", type=int, default=100)
 parser.add_argument("--scripted", action="store_true", help="run a deterministic no-op loop (no LLM)")

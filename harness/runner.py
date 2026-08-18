@@ -44,7 +44,7 @@ def _make_live_viewer(viz: VizConfig):
     return None
 
 
-def _write_episode_video(recorder, start: int, cfg, index: int, seed: int,
+def _write_episode_video(frames: list, cfg, index: int, seed: int,
                          success: Optional[bool]) -> Optional[Path]:
     """Write one episode's frames to `<stem>_ep<i>_seed<n>_<outcome><ext>`.
 
@@ -53,7 +53,6 @@ def _write_episode_video(recorder, start: int, cfg, index: int, seed: int,
     """
     from harness.viz.video import write_video
 
-    frames = [s.frame for s in recorder.steps[start:] if s.frame is not None]
     if not frames:
         log.warning("episode %d captured no frames; is the env's render() returning None?", index)
         return None
@@ -76,6 +75,16 @@ def run_eval(cfg: HarnessConfig) -> dict:
 
     llm = get_llm(cfg.llm)
     env = get_env(cfg.env)
+
+    # Capture at the env boundary, not once per LLM turn: a single tool call can
+    # drive many env steps, and a per-turn video skips exactly the motion a
+    # reviewer wants to see.
+    capture = None
+    if cfg.viz.enabled and cfg.viz.video and cfg.viz.capture_frames:
+        from harness.viz.capture import FrameCapture
+
+        capture = FrameCapture(env, every=cfg.viz.capture_every)
+        env = capture
 
     viz_enabled = cfg.viz.enabled and cfg.viz.backend != "none"
     recorder = TraceRecorder(
@@ -126,6 +135,8 @@ def run_eval(cfg: HarnessConfig) -> dict:
     try:
         for i in range(cfg.eval.episodes):
             seed = cfg.seed + i
+            if capture is not None:
+                capture.clear()
             t0 = time.time()
             err: Optional[BaseException] = None
             try:
@@ -136,12 +147,16 @@ def run_eval(cfg: HarnessConfig) -> dict:
                 log.warning("episode %d raised %s: %s", i, type(e).__name__, e)
             episodes.append(ep)
 
-            # Slice this episode's frames before the next one appends to the
-            # recorder: it accumulates across episodes, so writing at the end
-            # would splice every episode into one video with no boundary.
-            if recorder is not None and cfg.viz.video:
-                _write_episode_video(recorder, ep_start, cfg, i, seed, ep.success)
-                ep_start = len(recorder.steps)
+            # Write this episode's frames before the next one overwrites them:
+            # both the capture wrapper and the recorder accumulate, so a single
+            # write at the end would splice every episode into one video.
+            if cfg.viz.video:
+                frames = (capture.frames if capture is not None
+                          else [s.frame for s in recorder.steps[ep_start:]
+                                if s.frame is not None] if recorder is not None else [])
+                _write_episode_video(list(frames), cfg, i, seed, ep.success)
+                if recorder is not None:
+                    ep_start = len(recorder.steps)
 
             rec = record_from_episode(
                 ep, env,
